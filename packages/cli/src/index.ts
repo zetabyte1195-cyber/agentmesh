@@ -12,14 +12,14 @@ const ENTRY = fileURLToPath(import.meta.url);
 
 const COMMANDS: Record<string, { summary: string; task: string }> = {
   init: { summary: 'Set up AgentMesh in this folder (detects your agents; can start a new project)', task: 'P2.3' },
-  doctor: { summary: 'Check this machine and project; --test runs each agent end to end, --fix applies safe fixes', task: 'P3.6' },
+  doctor: { summary: 'Check this machine and project; --install installs what is missing (asks first), --test runs each agent, --fix applies safe fixes', task: 'P3.6' },
   start: { summary: 'Start AgentMesh and open the cockpit; --background keeps it running after you close the window', task: 'P2.1/P3.1' },
   login: { summary: 'Open the cockpit again with a fresh link (while AgentMesh is running)', task: 'G1' },
   stop: { summary: 'Stop AgentMesh (running agents stop with it)', task: 'G6' },
   status: { summary: 'Show agents, missions, tasks, file locks and questions waiting for you', task: 'G14' },
   dispatch: { summary: 'dispatch pause|resume [agent]: stop or restart handing out work', task: 'G14' },
   export: { summary: 'Write a Markdown snapshot of the board and timeline', task: 'P3.2' },
-  repair: { summary: "Fix AgentMesh's database engine after a Node upgrade (installed copy only)", task: 'G16' },
+  repair: { summary: "Download AgentMesh's database engine again if it stopped loading", task: 'G16' },
 };
 
 export interface RunResult {
