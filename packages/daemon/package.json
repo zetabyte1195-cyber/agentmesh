@@ -1,0 +1,26 @@
+{
+  "name": "@agentmesh/daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "agentmeshd: SQLite store, leases, worktrees, merge queue, MCP gateway, runner. Implemented from P1.2 onward.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@agentmesh/core": "0.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^13.0.3",
+    "ws": "^8.21.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/ws": "^8.18.1"
+  }
+}

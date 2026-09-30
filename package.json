@@ -1,0 +1,27 @@
+{
+  "name": "agentmesh-monorepo",
+  "private": true,
+  "type": "module",
+  "description": "AgentMesh: local-first coordination platform for multiple AI coding agents. See UNIVERSAL_AGENT_MESH_PLATFORM_SPECIFICATION_v1.1.md.",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b && npm run build -w @agentmesh/dashboard",
+    "clean": "tsc -b --clean",
+    "test": "tsc -b && vitest run",
+    "lint": "eslint .",
+    "check": "npm run lint && npm test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.2",
+    "eslint": "^10.11.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.1",
+    "vitest": "^5.0.1"
+  }
+}

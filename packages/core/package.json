@@ -1,0 +1,15 @@
+{
+  "name": "@agentmesh/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared domain types and rules (task statuses, state machine, audit rules). Implemented from P1.2 onward.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  }
+}
