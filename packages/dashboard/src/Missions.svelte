@@ -2,7 +2,8 @@
   // Missions: one brief → a plan by the agent you pick → the other agents look for gaps → YOU decide →
   // the agents split it into tasks and build it. This screen is where the Human steers all of that.
   import Markdown from './Markdown.svelte';
-  import { formatUsage, post, type UsageTotals } from './api';
+  import { onMount } from 'svelte';
+  import { formatUsage, get, post, type UsageTotals } from './api';
 
   type Agent = { id: string; name: string; platform: string };
   type Review = { round: number; planVersion: number; reviewer: string; verdict: 'OK' | 'GAPS'; gaps: string };
@@ -71,6 +72,45 @@
     }
   }
 
+  // ── starter briefs ──
+  type Template = { id: string; title: string; summary: string; name: string; brief: string; tip?: string; builtIn: boolean };
+  let templates = $state<{ builtIn: Template[]; mine: Template[] }>({ builtIn: [], mine: [] });
+  let tip = $state('');
+  let templateMessage = $state('');
+  async function loadTemplates(): Promise<void> {
+    try {
+      templates = await get<{ builtIn: Template[]; mine: Template[] }>('/api/templates');
+    } catch {
+      // the form still works without starter briefs
+    }
+  }
+  onMount(() => void loadTemplates());
+  function pick(t: Template): void {
+    title = t.name;
+    brief = t.brief;
+    tip = t.tip ?? '';
+    templateMessage = '';
+  }
+  const blanks = $derived(/\[[^\]]+\]/.test(brief));
+  async function saveTemplate(): Promise<void> {
+    templateMessage = '';
+    try {
+      await post('/api/templates/save', { title: title.trim(), brief: brief.trim() });
+      templateMessage = 'Saved. It now appears with the starter ideas above.';
+      await loadTemplates();
+    } catch (e) {
+      templateMessage = (e as Error).message;
+    }
+  }
+  async function deleteTemplate(id: string): Promise<void> {
+    try {
+      await post('/api/templates/delete', { id });
+      await loadTemplates();
+    } catch (e) {
+      templateMessage = (e as Error).message;
+    }
+  }
+
   // ── steer one mission ──
   let busy = $state<Record<string, boolean>>({});
   let errors = $state<Record<string, string>>({});
@@ -95,7 +135,7 @@
   const badge = 'rounded-full border px-2 py-0.5 text-xs font-medium';
   const field = 'mt-1 w-full rounded-lg border border-stone-300 bg-stone-50 p-2 text-sm dark:border-stone-700 dark:bg-stone-950';
   const button = 'rounded-lg border border-stone-300 px-3 py-1.5 text-sm font-medium hover:bg-stone-100 disabled:opacity-50 dark:border-stone-700 dark:hover:bg-stone-800';
-  const primary = 'rounded-lg bg-stone-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50 dark:bg-stone-100 dark:text-stone-900';
+  const primary = 'rounded-lg bg-marigold-400 px-3 py-1.5 text-sm font-semibold text-stone-950 hover:bg-marigold-300 disabled:opacity-50';
 </script>
 
 <section aria-label="Start a mission" class="mb-6 rounded-xl border border-stone-200 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
@@ -106,10 +146,24 @@
   {#if workers.length === 0}
     <p class="mt-3 rounded-lg border border-amber-500 bg-amber-50 p-3 text-sm dark:bg-amber-950">No agents are connected yet. Open <strong>Setup</strong> and connect at least one.</p>
   {:else}
+    <p class="mt-3 text-xs font-medium" id="tpl-label">Start from an idea (optional)</p>
+    <div class="mt-1 flex flex-wrap gap-2" role="group" aria-labelledby="tpl-label">
+      {#each [...templates.builtIn, ...templates.mine] as t (t.id)}
+        <div class="flex items-stretch rounded-lg border border-stone-300 dark:border-stone-700">
+          <button class="px-3 py-1.5 text-left hover:bg-stone-100 dark:hover:bg-stone-800" onclick={() => pick(t)} title={t.summary}>
+            <span class="block text-sm font-medium">{t.title}</span>
+            <span class="block text-xs text-stone-500">{t.summary}</span>
+          </button>
+          {#if !t.builtIn}<button class="border-l border-stone-300 px-2 text-stone-500 hover:text-red-700 dark:border-stone-700" aria-label={`Delete the template ${t.title}`} title="Delete this template" onclick={() => deleteTemplate(t.id)}>×</button>{/if}
+        </div>
+      {/each}
+    </div>
     <label class="mt-3 block text-xs font-medium" for="m-title">Name</label>
     <input id="m-title" class={field} placeholder="e.g. Car wash booking app" maxlength="200" bind:value={title} />
     <label class="mt-3 block text-xs font-medium" for="m-brief">The brief</label>
-    <textarea id="m-brief" class={field} rows="5" placeholder="Who is it for, what should it do, anything that must or must not be in it." bind:value={brief}></textarea>
+    <textarea id="m-brief" class={field} rows="9" placeholder="Who is it for, what should it do, anything that must or must not be in it." bind:value={brief}></textarea>
+    {#if blanks}<p class="mt-1 text-xs text-amber-700 dark:text-amber-400">The parts in [square brackets] are for you to fill in: replace them with your own details.</p>{/if}
+    {#if tip}<p class="mt-1 text-xs text-stone-500">Tip: {tip}</p>{/if}
     <div class="mt-3 grid gap-3 sm:grid-cols-2">
       <label class="text-xs font-medium">Who writes the plan
         <select class={field} bind:value={planner}>
@@ -127,7 +181,9 @@
     </div>
     <div class="mt-3 flex items-center gap-3">
       <button class={primary} disabled={startBusy || !title.trim() || brief.trim().length < 10 || !planner} onclick={start}>{startBusy ? 'Starting…' : 'Start'}</button>
+      <button class={button} disabled={!title.trim() || brief.trim().length < 10} title="Keep this name and brief to start from again later" onclick={saveTemplate}>Save as a template</button>
       {#if startError}<span role="alert" class="text-sm text-red-600">{startError}</span>{/if}
+      {#if templateMessage}<span class="text-sm text-stone-600 dark:text-stone-300" aria-live="polite">{templateMessage}</span>{/if}
     </div>
   {/if}
 </section>

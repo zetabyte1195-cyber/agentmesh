@@ -18,6 +18,8 @@ import type { LeaseArbiter } from '../leases/index.js';
 import { type MissionService, planJob, reviewJob, reviseJob, splitJob } from '../missions/index.js';
 import type { AgentCommand } from '../runner/commands.js';
 import { type RunResult, type RunningAgent, startAgent } from '../runner/run.js';
+import { type SandboxRuntime, explainSandboxFailure } from '../sandbox/index.js';
+import { composePrompt } from './prompt.js';
 import { hasUsageTable, recordUsage } from './usage.js';
 
 export const DISPATCH_MIGRATION: Migration = {
@@ -96,11 +98,19 @@ export interface RunContext {
   dir: string;
   /** Claude-format config ({type:'http', url, headers}) for claude --mcp-config. */
   claudeMcpConfig: string;
+  toolConfigs?: { opencode: string; gemini: string };
+  inContainer?: boolean;
 }
 
 export interface DispatcherOptions {
   /** The daemon's MCP endpoint, e.g. http://127.0.0.1:8934/mcp. */
   mcpUrl?: string;
+  /** The Human's note about the project (read at each launch, so edits apply to the next run). */
+  context?: () => string | null | undefined;
+  /** The playbook list for the prompt, within a character budget (see playbooks/). */
+  playbooks?: (maxChars: number) => string;
+  /** Container mode (experimental): agents it applies to run inside a container; while it is blocked they wait. */
+  sandbox?: SandboxRuntime;
   db: SqliteDatabase;
   identity: IdentityService;
   leases?: LeaseArbiter;
@@ -172,7 +182,13 @@ export function writeRunContext(token: string, mcpUrl: string): RunContext {
   writeFileSync(claudeMcpConfig, JSON.stringify({ mcpServers: { agentmesh: { type: 'http', url: mcpUrl, headers } } }));
   mkdirSync(join(dir, '.agents'));
   writeFileSync(join(dir, '.agents', 'mcp_config.json'), JSON.stringify({ mcpServers: { agentmesh: { serverUrl: mcpUrl, headers, disabled: false } } }));
-  return { token, mcpUrl, dir, claudeMcpConfig };
+  // Other tools read the same connection in their own formats. Each file holds this run's token, lives in the run folder
+  // (outside the repository) and is deleted with it when the run ends.
+  const opencode = join(dir, 'opencode-mcp.json');
+  writeFileSync(opencode, JSON.stringify({ mcp: { agentmesh: { type: 'remote', url: mcpUrl, enabled: true, oauth: false, headers } } }));
+  const gemini = join(dir, 'gemini-settings.json');
+  writeFileSync(gemini, JSON.stringify({ mcpServers: { agentmesh: { httpUrl: mcpUrl, headers, trust: true } } }));
+  return { token, mcpUrl, dir, claudeMcpConfig, toolConfigs: { opencode, gemini } };
 }
 
 export class Dispatcher {
@@ -180,6 +196,8 @@ export class Dispatcher {
   private readonly running = new Map<string, { runId: string; taskId: string | null; agent: RunningAgent | null }>();
   private timer: NodeJS.Timeout | null = null;
   private usageTable: boolean | undefined;
+  /** run id -> the container's name, for the runs that started in one. */
+  private readonly containers = new Map<string, string | null>();
   private readonly now: () => Date;
   /** The agents this dispatcher may run; the Human can connect more while it runs (cockpit setup). */
   private readonly agents: DispatchableAgent[];
@@ -304,6 +322,8 @@ export class Dispatcher {
     const cooling = new Set(this.backoffs().map((b) => b.platform));
     for (const agent of this.agents) {
       if (this.isBusy(agent.agentId) || this.isPaused(agent.agentId) || cooling.has(agent.platform)) continue;
+      // A containerized agent waits (no run started, no attempt used) while its container engine is down: it never runs outside the container instead.
+      if (this.options.sandbox?.appliesTo(agent.agentId) && this.options.sandbox.blockedReason()) continue;
       const work = this.nextWork(agent);
       if (!work) continue;
       const runId = this.launch(agent, work);
@@ -463,7 +483,7 @@ export class Dispatcher {
       work.kind,
       sqlTime(this.now()),
     );
-    const run = this.writeRunContext(token);
+    const run = this.writeRunContext(token, this.options.sandbox?.appliesTo(agent.agentId) ? this.options.sandbox.mcpUrl() : undefined);
     const fail = (message: string) => {
       identity.revokeToken(token);
       removeRunDir(run.dir);
@@ -524,14 +544,32 @@ export class Dispatcher {
     const { db, identity } = this.options;
     // Headless agy refuses reads in the main repository outside the worktree (e.g. its .agentmesh/
     // folder, which is local and not in the worktree) and a refusal ends the run: verified in dogfood V1.1.
-    const prompt = `You are ${agent.agentId} on AgentMesh. Follow ${agent.rulebook} and start with mesh_get_board. ${work.job} Stay inside your working directory: files of the main repository outside it (such as its .agentmesh/ folder, which is local runtime state and not in your worktree) cannot be read, and a refused action ends your run. Keep mesh_set_status current and set it to idle when you finish.`;
+    const base = `You are ${agent.agentId} on AgentMesh. Follow ${agent.rulebook} and start with mesh_get_board. ${work.job} Stay inside your working directory: files of the main repository outside it (such as its .agentmesh/ folder, which is local runtime state and not in your worktree) cannot be read, and a refused action ends your run. Keep mesh_set_status current and set it to idle when you finish.`;
+    // The Human's note (and the playbook list) are fitted into the prompt limit: they can be shortened but never make a launch fail.
+    const prompt = composePrompt(base, { note: this.options.context?.(), ...(this.options.playbooks ? { catalogue: (n: number) => this.options.playbooks!(n) } : {}) });
     let running: RunningAgent;
     try {
       const principal = identity.authenticate(token);
+      // Container mode: the tool is built for the container's view of the paths, then wrapped in the container command.
+      let command: AgentCommand;
+      let hooks: { terminate: () => Promise<void>; cleanup: () => Promise<void> } | null = null;
+      let containerName: string | null = null;
+      const sandbox = this.options.sandbox;
+      if (sandbox?.appliesTo(agent.agentId)) {
+        const view = sandbox.view(run);
+        const wrapped = sandbox.wrap(agent.command(prompt, view.cwd, view.run), { runId, cwd, runDir: run.dir, cwdIsRepoRoot: cwd === this.options.repoRoot });
+        command = wrapped.command;
+        containerName = wrapped.name;
+        hooks = sandbox.hooks(wrapped.name);
+      } else {
+        command = agent.command(prompt, cwd, run);
+      }
+      this.containers.set(runId, containerName);
       running = (this.options.start ?? startAgent)({
-        command: agent.command(prompt, cwd, run),
+        command,
         cwd,
         env: { AGENTMESH_TOKEN: token },
+        ...(hooks ? { terminate: hooks.terminate, cleanup: hooks.cleanup } : {}),
         ...(this.options.runTimeoutMs ? { timeoutMs: this.options.runTimeoutMs } : {}),
         heartbeat: {
           intervalMs: 30_000,
@@ -570,13 +608,21 @@ export class Dispatcher {
     identity.revokeToken(token); // the run's credential dies with the run
     this.running.delete(agent.agentId);
     const text = [result.failure ?? '', result.result?.text ?? '', ...result.stderrTail].join('\n');
-    let status: 'SUCCEEDED' | 'FAILED' | 'QUOTA' | 'STOPPED' = result.ok ? 'SUCCEEDED' : result.stopped && !result.timedOut ? 'STOPPED' : 'FAILED';
-    if (!result.ok && !isQuotaFailure(text) && isTransientFailure(text)) {
+    // Container problems are not the agent's quota: they are explained (and backed off) first.
+    const containerName = this.containers.get(runId) ?? null;
+    this.containers.delete(runId);
+    const infra = containerName ? explainSandboxFailure(result, containerName) : null;
+    // A run stopped for repeating itself was stopped by AgentMesh, but it is a failure of the agent, with its reason kept.
+    let status: 'SUCCEEDED' | 'FAILED' | 'QUOTA' | 'STOPPED' = result.ok ? 'SUCCEEDED' : result.noProgress ? 'FAILED' : result.stopped && !result.timedOut ? 'STOPPED' : 'FAILED';
+    if (infra && infra.backoffMs > 0) {
+      db.prepare('INSERT INTO platform_backoff (platform, until, reason) VALUES (?, ?, ?) ON CONFLICT(platform) DO UPDATE SET until = excluded.until, reason = excluded.reason').run(agent.platform, sqlTime(new Date(this.now().getTime() + infra.backoffMs)), `container: ${infra.text.slice(0, 180)}`);
+    }
+    if (!result.ok && !infra && !isQuotaFailure(text) && isTransientFailure(text)) {
       // Provider outage (e.g. agy: UNAVAILABLE 503, seen in live AC-8 run #2): short platform back-off.
       const until = new Date(this.now().getTime() + TRANSIENT_BACKOFF_MS);
       db.prepare('INSERT INTO platform_backoff (platform, until, reason) VALUES (?, ?, ?) ON CONFLICT(platform) DO UPDATE SET until = excluded.until, reason = excluded.reason').run(agent.platform, sqlTime(until), 'provider unavailable (transient)');
     }
-    if (!result.ok && isQuotaFailure(text)) {
+    if (!result.ok && !infra && isQuotaFailure(text)) {
       status = 'QUOTA';
       const until = new Date(this.now().getTime() + (parseResetDelay(text) ?? DEFAULT_BACKOFF_MS));
       withImmediateTransaction(db, () =>
@@ -589,15 +635,16 @@ export class Dispatcher {
     // and with the process gone the cause was unrecoverable.
     // Successful runs keep the agent's final answer too: a run that "succeeded" without doing the
     // work (dogfood V1.1) is otherwise undiagnosable.
-    const detail = (result.ok ? (result.result?.text ?? '') : text).trim().replace(/\n{2,}/g, '\n').slice(-4000) || null;
+    const rawDetail = (result.ok ? (result.result?.text ?? '') : text).trim().replace(/\n{2,}/g, '\n');
+    const detail = (infra ? `[container] ${infra.text}\n${rawDetail}` : rawDetail).slice(-4000) || null;
     db.prepare('UPDATE dispatch_runs SET status = ?, detail = ?, ended_at = ? WHERE id = ?').run(status, detail, sqlTime(this.now()), runId);
     if (result.result && (this.usageTable ??= hasUsageTable(db))) recordUsage(db, runId, result.result.usage, result.result.costUsd);
     this.options.onRunFinished?.({ runId, agentId: agent.agentId, work, result });
   }
 
   /** Write this run's MCP configs (Claude and agy formats, both verified) into a fresh temp folder. */
-  private writeRunContext(token: string): RunContext {
-    return writeRunContext(token, this.options.mcpUrl ?? 'http://127.0.0.1:8934/mcp');
+  private writeRunContext(token: string, mcpUrl?: string): RunContext {
+    return writeRunContext(token, mcpUrl ?? this.options.mcpUrl ?? 'http://127.0.0.1:8934/mcp');
   }
 
   private setState(key: string, value: string): void {

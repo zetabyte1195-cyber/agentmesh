@@ -44,6 +44,7 @@ if (!chunk || chunk.code.length < 200_000 || !chunk.code.includes('agentmesh') |
 writeFileSync(join(out, 'bin', 'cli.mjs'), chunk.code.startsWith('#!') ? chunk.code : `#!/usr/bin/env node\n${chunk.code}`);
 if (!chunk.code.includes('export {') || !/\bmain\b/.test(chunk.code)) throw new Error('the bundle does not export main() for the launcher');
 cpSync(join(root, 'scripts', 'launcher.mjs'), join(out, 'bin', 'agentmesh.mjs'));
+cpSync(join(root, 'scripts', 'update.mjs'), join(out, 'bin', 'update.mjs'));
 
 cpSync(join(root, 'packages/dashboard/dist'), join(out, 'dashboard'), { recursive: true });
 for (const doc of ['README.md', 'INSTALL.md', 'LICENSE']) if (existsSync(join(root, doc))) cpSync(join(root, doc), join(out, doc));

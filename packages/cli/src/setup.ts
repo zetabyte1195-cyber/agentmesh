@@ -152,7 +152,7 @@ export function openBrowser(url: string): void {
   }
 }
 
-export async function cmdStart(argv: readonly string[], cwd: string, entry: string): Promise<CommandResult> {
+export async function cmdStart(argv: readonly string[], cwd: string, entry: string, version?: string): Promise<CommandResult> {
   const flags = parseFlags(argv);
   if ('error' in flags) return { code: 1, output: `agentmesh start: ${flags.error}` };
   if (flags.background) {
@@ -168,7 +168,7 @@ export async function cmdStart(argv: readonly string[], cwd: string, entry: stri
   }
   let daemon;
   try {
-    daemon = await d.startDaemon({ repoRoot: cwd, record: true, ...(flags.port ? { port: flags.port } : {}) });
+    daemon = await d.startDaemon({ repoRoot: cwd, record: true, ...(version ? { version } : {}), ...(flags.port ? { port: flags.port } : {}) });
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     const hint = e.code === 'EADDRINUSE' ? '\n  That port is in use (is AgentMesh already running?). Try: agentmesh start --port 8944' : e.code === 'EACCES' ? '\n  That port cannot be used (Windows reserves some ranges). Try: agentmesh start --port 8944' : /agentmesh init/.test(e.message) ? '' : '\n  Run "agentmesh doctor" to see what is wrong.';

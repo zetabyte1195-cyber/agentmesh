@@ -93,11 +93,11 @@
 
   const field = 'mt-1 w-full rounded-lg border border-stone-300 bg-stone-50 p-2 text-sm dark:border-stone-700 dark:bg-stone-950';
   const button = 'rounded-lg border border-stone-300 px-3 py-1.5 text-sm font-medium hover:bg-stone-100 disabled:opacity-50 dark:border-stone-700 dark:hover:bg-stone-800';
-  const primary = 'rounded-lg bg-stone-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50 dark:bg-stone-100 dark:text-stone-900';
+  const primary = 'rounded-lg bg-marigold-400 px-3 py-1.5 text-sm font-semibold text-stone-950 hover:bg-marigold-300 disabled:opacity-50';
 </script>
 
 <section aria-label="Needs you" class="rounded-xl border border-stone-200 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
-  <h2 class="mb-2 text-xs font-semibold uppercase tracking-wide text-stone-500">Needs you</h2>
+  <h2 class="mb-2 font-display text-lg font-semibold">Needs you</h2>
 
   {#each forHuman as q (q.id)}
     <div class="border-t border-stone-200 py-3 text-sm first:border-t-0 dark:border-stone-800">
@@ -168,7 +168,7 @@
 </section>
 
 <section aria-label="Message an agent" class="rounded-xl border border-stone-200 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
-  <h2 class="mb-2 text-xs font-semibold uppercase tracking-wide text-stone-500">Message an agent</h2>
+  <h2 class="mb-2 font-display text-lg font-semibold">Message an agent</h2>
   <div class="grid grid-cols-2 gap-2">
     <label class="text-xs font-medium">Agent
       <select class={field} bind:value={msg.toAgentId}>

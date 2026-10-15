@@ -69,7 +69,7 @@ describe('agentmesh start', () => {
     const client = new Client({ name: 't', version: '0' });
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${daemon.port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
     const names = (await client.listTools()).tools.map((t) => t.name);
-    expect(names.length).toBe(25); // 18 spec tools + mesh_get_diff + mesh_run_verification + mesh_commit + 4 mission tools
+    expect(names.length).toBe(27); // 18 spec tools + mesh_get_diff + mesh_run_verification + mesh_commit + 4 mission tools + 2 playbook tools
     expect(names).toContain('mesh_commit');
     expect(names).toEqual(expect.arrayContaining(['mesh_get_mission', 'mesh_submit_plan', 'mesh_submit_plan_review', 'mesh_finish_split']));
     await client.close();

@@ -2,14 +2,20 @@
   // Setup: connect the agents you have, prove each one works, and tell AgentMesh how to check your project.
   import { onMount } from 'svelte';
   import { get, post } from './api';
+  import ContainerMode from './ContainerMode.svelte';
+  import Notifications from './Notifications.svelte';
+  import Playbooks from './Playbooks.svelte';
+  import ProjectContext from './ProjectContext.svelte';
+  import type { NotificationsState, PlaybooksState, RecipeInfo, SandboxState, UpdateState } from './types';
+  import Updates from './Updates.svelte';
 
   type Diagnosis = { level: string; title: string; detail: string; fix?: string };
   type Detected = { id: string; label: string; verified: boolean; installed: boolean; version: string | null; problem: string | null; needsFix: boolean; diagnoses: Diagnosis[] };
-  type PlatformInfo = { id: string; label: string; friendlyName: string; verified: boolean; summary: string; agents: string[] };
-  type Project = { verifyCommand: string | null; landWithoutVerify: boolean; suggestedVerifyCommand: string | null; landing: boolean };
+  type PlatformInfo = { id: string; label: string; friendlyName: string; verified: boolean; loopProtection: boolean; summary: string; agents: string[] };
+  type Project = { name: string; verifyCommand: string | null; landWithoutVerify: boolean; suggestedVerifyCommand: string | null; landing: boolean; context: string; maxContext: number };
   type TestResult = { ok: boolean; seconds: number; detail: string; said?: string };
 
-  let { platforms, project, onChanged }: { platforms: PlatformInfo[]; project: Project; onChanged: () => void } = $props();
+  let { platforms, project, notifications, update, version, playbooks, recipes, sandbox, onChanged }: { platforms: PlatformInfo[]; project: Project; playbooks: PlaybooksState | null; recipes: RecipeInfo[]; sandbox: SandboxState | null; notifications: NotificationsState; update: UpdateState; version: string | null; onChanged: () => void } = $props();
 
   let detected = $state<Record<string, Detected>>({});
   let scanning = $state(false);
@@ -62,6 +68,13 @@
       await post('/api/platforms/fix', { platform: p.id });
       await scan();
     });
+  const addRecipe = (r: RecipeInfo) =>
+    run(`recipe-${r.id}`, async () => {
+      await post('/api/platforms/recipe', { id: r.id });
+      messages[`recipe-${r.id}`] = `${r.title} added. Install it and sign in if you have not, then Connect it above and press Test.`;
+      await scan();
+      onChanged();
+    });
   const saveSettings = (body: Record<string, unknown>) =>
     run('project', async () => {
       await post('/api/settings', body);
@@ -72,7 +85,7 @@
   const badge = 'rounded-full border px-2 py-0.5 text-xs font-medium';
   const field = 'mt-1 w-full rounded-lg border border-stone-300 bg-stone-50 p-2 text-sm dark:border-stone-700 dark:bg-stone-950';
   const button = 'rounded-lg border border-stone-300 px-3 py-1.5 text-sm font-medium hover:bg-stone-100 disabled:opacity-50 dark:border-stone-700 dark:hover:bg-stone-800';
-  const primary = 'rounded-lg bg-stone-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50 dark:bg-stone-100 dark:text-stone-900';
+  const primary = 'rounded-lg bg-marigold-400 px-3 py-1.5 text-sm font-semibold text-stone-950 hover:bg-marigold-300 disabled:opacity-50';
 </script>
 
 <section aria-label="Agents" class="mb-6">
@@ -101,6 +114,7 @@
           {:else}Installed{d.version ? `: ${d.version}` : ''}.{/if}
         </p>
         {#if p.agents.length}<p class="mt-1 text-sm">Connected as <strong>{p.agents.join(', ')}</strong>.</p>{/if}
+        <p class="mt-1 text-xs text-stone-500" title="When an agent makes the same tool call with the same result three times in a row, AgentMesh stops the run and says why, instead of letting it use up your quota.">Stuck-loop protection: {p.loopProtection ? 'on' : 'not available for this tool'}.</p>
 
         {#if d?.needsFix}
           <div class="mt-2 rounded-lg border border-amber-500 bg-amber-50 p-2 text-sm dark:bg-amber-950">
@@ -128,7 +142,28 @@
       </article>
     {/each}
   </div>
-  <p class="mt-3 text-xs text-stone-500">Another tool? Add it under "customPlatforms" in .agentmesh/config.json (see the README), restart, and it appears here as unverified until you test it.</p>
+  {#if recipes.some((r) => !r.added)}
+    <h3 class="mt-5 text-sm font-semibold">Add another tool</h3>
+    <p class="text-xs text-stone-500">Ready-made definitions written from each vendor's documentation. <strong>None has been run by AgentMesh's authors</strong>: every one is added as "not verified" until your own Test passes. Read the notes first.</p>
+    <div class="mt-2 grid gap-3 lg:grid-cols-3">
+      {#each recipes.filter((r) => !r.added) as r (r.id)}
+        <article class="rounded-xl border border-stone-200 bg-white p-4 text-sm dark:border-stone-800 dark:bg-stone-900" aria-label={r.title}>
+          <h4 class="font-semibold">{r.title}</h4>
+          <p class="mt-1 text-stone-600 dark:text-stone-300">{r.summary}</p>
+          <details class="mt-2">
+            <summary class="cursor-pointer text-xs font-medium">Read before adding ({r.caveats.length} note{r.caveats.length === 1 ? '' : 's'})</summary>
+            <ul class="mt-1 list-disc space-y-1 pl-5 text-xs text-stone-600 dark:text-stone-300">{#each r.caveats as c (c)}<li>{c}</li>{/each}</ul>
+            <p class="mt-2 text-xs"><strong>Get it:</strong> <code class="font-mono">{r.install}</code></p>
+            <p class="mt-1 text-xs"><strong>Then:</strong> {r.signIn}</p>
+            <p class="mt-1 text-xs">Documentation: {#each r.docs as d, i (d)}<a class="underline" href={d} target="_blank" rel="noreferrer">link {i + 1}</a>{i < r.docs.length - 1 ? ', ' : ''}{/each}</p>
+          </details>
+          <button class={['mt-3', button]} disabled={busy[`recipe-${r.id}`]} onclick={() => addRecipe(r)}>Add as "not verified"</button>
+          {#if errors[`recipe-${r.id}`]}<p role="alert" class="mt-2 text-xs text-red-600">{errors[`recipe-${r.id}`]}</p>{/if}
+        </article>
+      {/each}
+    </div>
+  {/if}
+  <p class="mt-3 text-xs text-stone-500">A tool that is not listed? Describe it under "customPlatforms" in .agentmesh/config.json (see the README); it appears above as unverified until you test it.</p>
 </section>
 
 <section aria-label="Project check" class="rounded-xl border border-stone-200 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
@@ -158,3 +193,11 @@
   {/if}
   {#if errors.project}<p role="alert" class="mt-2 text-sm text-red-600">{errors.project}</p>{/if}
 </section>
+
+<div class="mt-6 grid gap-6">
+  {#if sandbox}<ContainerMode {sandbox} />{/if}
+  <ProjectContext context={project.context} max={project.maxContext} {onChanged} />
+  {#if playbooks}<Playbooks {playbooks} {onChanged} />{/if}
+  <Notifications {notifications} {onChanged} />
+  <Updates {version} {update} {onChanged} />
+</div>

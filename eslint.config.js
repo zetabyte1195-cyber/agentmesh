@@ -8,5 +8,5 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   // Build scripts run under Node.
-  { files: ['scripts/**/*.mjs'], languageOptions: { globals: { process: 'readonly', console: 'readonly' } } },
+  { files: ['scripts/**/*.mjs'], languageOptions: { globals: { process: 'readonly', console: 'readonly', fetch: 'readonly', AbortSignal: 'readonly' } } },
 );

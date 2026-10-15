@@ -82,6 +82,7 @@ export const claudeAdapter: PlatformAdapter = {
   rulebook: 'CLAUDE.md',
   verified: true,
   summary: 'Anthropic Claude Code CLI (`claude -p`). Sign in once with `claude`.',
+  loopProtection: true,
   detect: () => probeVersion('claude', ['--version']),
   command: (spec) =>
     claudeCommand({ prompt: spec.prompt, worktree: spec.cwd, mcpConfigFile: spec.run.claudeMcpConfig, allowedTools: spec.allowedTools ?? DEFAULT_CLAUDE_ALLOWED_TOOLS }),
@@ -94,6 +95,7 @@ export const antigravityAdapter: PlatformAdapter = {
   rulebook: 'GEMINI.md',
   verified: true,
   summary: 'Google Antigravity CLI (`agy -p`). Sign in once with `agy`; AgentMesh needs one allow rule.',
+  loopProtection: false, // its stream does not expose tool calls in a form that can be compared
   detect: () => probeVersion(defaultAgyExecutable(), ['--version']),
   diagnose: async (): Promise<Diagnosis[]> => {
     const path = agySettingsPath();
@@ -111,5 +113,5 @@ export const antigravityAdapter: PlatformAdapter = {
       },
     ];
   },
-  command: (spec) => agyCommand({ prompt: spec.prompt, worktree: spec.cwd, extraDirs: [spec.run.dir] }),
+  command: (spec) => agyCommand({ prompt: spec.prompt, worktree: spec.cwd, extraDirs: [spec.run.dir], ...(spec.run.inContainer ? { executable: 'agy' } : {}) }),
 };

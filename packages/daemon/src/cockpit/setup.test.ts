@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { initProject } from '../init/index.js';
 import { type RunningDaemon, startDaemon } from '../start/index.js';
@@ -62,7 +62,7 @@ afterEach(async () => {
 describe('the cockpit setup panel', () => {
   it('a new project starts landing on review alone; the snapshot says so and suggests a check once one exists', async () => {
     const s = ((await get('/api/state')).json as { setup: { project: Record<string, unknown>; platforms: { id: string; agents: string[]; verified: boolean }[] } }).setup;
-    expect(s.project).toMatchObject({ verifyCommand: null, landWithoutVerify: true, landing: true, suggestedVerifyCommand: null });
+    expect(s.project).toMatchObject({ name: basename(repo), verifyCommand: null, landWithoutVerify: true, landing: true, suggestedVerifyCommand: null }); // the folder's name, for the cockpit's title block
     expect(s.platforms.map((p) => [p.id, p.verified, p.agents])).toEqual([['CLAUDE_CODE', true, ['claude-1']], ['ANTIGRAVITY', true, []], ['FAKE', false, []]]);
     writeFileSync(join(repo, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
     const later = ((await get('/api/state')).json as { setup: { project: { suggestedVerifyCommand: string | null } } }).setup.project;

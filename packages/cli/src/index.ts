@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { cmdDispatch, cmdLogin, cmdStatus, cmdStop, cmdSupervise } from './runtime-commands.js';
 import { cmdDoctor, cmdInit, cmdStart } from './setup.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 /** This program's own file (the bundle, once packed): background mode starts it again as a supervisor. */
 const ENTRY = fileURLToPath(import.meta.url);
 
@@ -19,6 +19,7 @@ const COMMANDS: Record<string, { summary: string; task: string }> = {
   status: { summary: 'Show agents, missions, tasks, file locks and questions waiting for you', task: 'G14' },
   dispatch: { summary: 'dispatch pause|resume [agent]: stop or restart handing out work', task: 'G14' },
   export: { summary: 'Write a Markdown snapshot of the board and timeline', task: 'P3.2' },
+  update: { summary: 'Install the newest release (update --check only looks)', task: 'T5' },
   repair: { summary: "Download AgentMesh's database engine again if it stopped loading", task: 'G16' },
 };
 
@@ -45,9 +46,10 @@ export function run(argv: readonly string[]): RunResult {
 /** Commands that are implemented; everything else falls through to run(). */
 export async function runAsync(argv: readonly string[], cwd = process.cwd()): Promise<RunResult> {
   if (argv[0] === 'init') return cmdInit(argv.slice(1), cwd);
-  if (argv[0] === 'start') return cmdStart(argv.slice(1), cwd, ENTRY);
+  if (argv[0] === 'start') return cmdStart(argv.slice(1), cwd, ENTRY, VERSION);
   if (argv[0] === 'supervise') return cmdSupervise(argv.slice(1), cwd, ENTRY);
-  // The installed program's launcher handles `repair` before this code loads; reaching here means a source checkout.
+  // The installed program's launcher handles `update` and `repair` before this code loads; reaching here means a source checkout.
+  if (argv[0] === 'update') return { code: 0, output: 'This copy runs from the source folder, so it is updated with git: git pull, npm ci, npm run build.' };
   if (argv[0] === 'repair') return { code: 0, output: 'This copy runs from the source folder, so there is nothing to repair here. If its database engine fails, run: npm rebuild better-sqlite3   (in the AgentMesh folder)' };
   if (argv[0] === 'login') return cmdLogin(argv.slice(1), cwd);
   if (argv[0] === 'stop') return cmdStop(argv.slice(1), cwd);

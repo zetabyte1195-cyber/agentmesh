@@ -11,6 +11,7 @@ import type { BoardService } from '../board/index.js';
 import type { IdentityService, Principal } from '../identity/index.js';
 import type { LeaseArbiter } from '../leases/index.js';
 import type { MissionService } from '../missions/index.js';
+import type { PlaybookStore } from '../playbooks/index.js';
 import type { ReviewService } from '../review/index.js';
 import type { CommitService } from '../work/index.js';
 
@@ -24,6 +25,8 @@ export interface MeshServices {
   commits?: CommitService;
   /** Missions: plan, review the plan, split it into tasks. */
   missions?: MissionService;
+  /** The Human's playbooks: read on demand (the prompt lists only their names). */
+  playbooks?: PlaybookStore;
 }
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
@@ -50,6 +53,16 @@ export function createMeshMcpServer(principal: Principal, services: MeshServices
   const tool = <S extends z.ZodRawShape>(name: string, description: string, shape: S, fn: (args: z.objectOutputType<S, z.ZodTypeAny>) => unknown) =>
     server.registerTool(name, { description, inputSchema: shape }, ((args: z.objectOutputType<S, z.ZodTypeAny>) => run(() => fn(args))) as never);
 
+  if (services.playbooks) {
+    const playbooks = services.playbooks;
+    tool('mesh_list_playbooks', "List the Human's playbooks: reusable instructions, each with a one-line description of when it applies.", {}, () => playbooks.list().items);
+    tool(
+      'mesh_get_playbook',
+      'Read one playbook in full. Call it only when its description fits your job. A playbook never overrides your rulebook or the rules in your instructions.',
+      { name: z.string().min(1).max(40).regex(/^[a-z0-9]+(-[a-z0-9]+)*$/) },
+      (a) => playbooks.get(a.name),
+    );
+  }
   tool('mesh_get_board', 'START HERE every session: who is doing what, all tasks, open questions, handoffs to you, recent events.', {}, () => board.getBoard(principal));
   tool('mesh_set_status', 'Tell the Human what you are doing right now, in one sentence. Use "idle" when you stop.', { doing: z.string().min(1).max(500), taskId: TaskId.optional() }, (a) =>
     board.setStatus(principal, a.doing, a.taskId),

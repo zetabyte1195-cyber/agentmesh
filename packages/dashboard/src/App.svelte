@@ -1,15 +1,25 @@
 <script lang="ts">
-  // AgentMesh cockpit shell (P3.1). Snapshot from GET /api/state, then live board events over the
-  // authenticated WebSocket (no polling). The timeline view is P3.2; Human controls are P3.3.
-  import { type ComponentProps, onMount } from 'svelte';
-  import { formatUsage, type UsageTotals } from './api';
+  // AgentMesh cockpit shell. Snapshot from GET /api/state, then live board events over the authenticated
+  // WebSocket (no polling). Navigation is a sidebar; Home is the first screen, Board is the detailed view.
+  import { type ComponentProps, onMount, tick } from 'svelte';
+  import type { AgentInfo } from './AgentCard.svelte';
+  import { type UsageTotals } from './api';
   import Controls from './Controls.svelte';
+  import Home from './Home.svelte';
   import Missions from './Missions.svelte';
+  import { announce, freshNotices, titleFor } from './notify';
+  import Runs from './Runs.svelte';
+  import Schedules from './Schedules.svelte';
   import Setup from './Setup.svelte';
+  import Sidebar from './Sidebar.svelte';
+  import { setTheme, storedTheme, type ThemeChoice } from './theme';
   import Timeline from './Timeline.svelte';
+  import TitleBlock from './TitleBlock.svelte';
+  import type { Notice, NotificationsState, PlaybooksState, RecipeInfo, Run, SandboxState, SchedulesState, UpdateState } from './types';
+  import type { View } from './views';
 
   let controlError = $state('');
-  /** Header/agent-card controls (P3.3): same-origin POST with the session cookie. */
+  /** Header/agent-card controls: same-origin POST with the session cookie. */
   async function control(path: string, body: unknown): Promise<void> {
     controlError = '';
     const res = await fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -17,46 +27,44 @@
     void load();
   }
 
-  type Agent = { id: string; name: string; platform: string; status: string; currentTaskId: string | null; doing: string | null };
   type Task = { id: string; title: string; status: string; assigned_agent_id: string | null; suggested_owner: string | null };
   type Question = { id: string; text: string; from_agent_id: string; to_role: string; task_id: string | null };
   type MeshEvent = { id: string; taskId: string | null; agentId: string | null; kind: string; text: string; createdAt: string };
   type Snapshot = {
     missions: ComponentProps<typeof Missions>['missions'];
-    setup: { project: ComponentProps<typeof Setup>['project']; platforms: ComponentProps<typeof Setup>['platforms'] };
-    agents: Agent[];
+    setup: { project: ComponentProps<typeof Setup>['project']; platforms: ComponentProps<typeof Setup>['platforms']; notifications: NotificationsState; update: UpdateState; recipes: RecipeInfo[] };
+    version: string | null;
+    notices: Notice[];
+    playbooks: PlaybooksState | null;
+    schedules: SchedulesState | null;
+    sandbox: SandboxState | null;
+    agents: AgentInfo[];
     tasks: Task[];
     openQuestions: Question[];
     events: MeshEvent[];
     leases: { id: string; taskId: string; agentId: string; path: string; type: string }[];
     usage: { byAgent: ({ agentId: string } & UsageTotals)[]; byMission: ({ missionId: string } & UsageTotals)[] };
-    dispatch: { paused: boolean; backoffs: { platform: string; until: string; reason: string }[]; stuck: NonNullable<ComponentProps<typeof Controls>['stuck']> } | null;
+    dispatch: { paused: boolean; backoffs: { platform: string; until: string; reason: string }[]; stuck: NonNullable<ComponentProps<typeof Controls>['stuck']>; recentRuns: Run[] } | null;
   };
 
   const COLUMNS = ['TODO', 'IN_PROGRESS', 'READY_FOR_REVIEW', 'AUDITING', 'PASSED', 'BLOCKED', 'REJECTED', 'COMMITTED'];
 
   let snapshot = $state<Snapshot | null>(null);
-  type View = 'missions' | 'board' | 'setup';
   let chosen = $state<View | null>(null);
-  // With no agent connected the only useful place is Setup; otherwise start where the work is described.
-  const view = $derived<View>(chosen ?? ((snapshot?.agents ?? []).some((a) => a.platform !== 'HUMAN') ? 'missions' : 'setup'));
-  const needsYou = $derived({
-    missions: (snapshot?.missions ?? []).filter((m) => m.status === 'PLAN_READY').length,
-    board: (snapshot?.openQuestions ?? []).filter((q) => q.to_role === 'Human').length + (snapshot?.dispatch?.stuck?.length ?? 0),
+  let theme = $state<ThemeChoice>(storedTheme());
+  // With no agent connected the only useful place is Setup; otherwise start on Home.
+  const view = $derived<View>(chosen ?? ((snapshot?.agents ?? []).some((a) => a.platform !== 'HUMAN') ? 'home' : 'setup'));
+  const badges = $derived<Partial<Record<View, number>>>({
+    missions: (snapshot?.notices ?? []).filter((n) => n.kind === 'plan').length,
+    board: (snapshot?.notices ?? []).filter((n) => n.kind === 'question' || n.kind === 'stuck').length,
+    schedules: (snapshot?.schedules?.items ?? []).filter((s) => s.disabledReason).length,
   });
-  const TABS: { id: View; label: string }[] = [
-    { id: 'missions', label: 'Missions' },
-    { id: 'board', label: 'Board' },
-    { id: 'setup', label: 'Setup' },
-  ];
   let auth = $state<'checking' | 'ok' | 'login'>('checking');
   let live = $state(false);
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const agentsHuman = $derived((snapshot?.agents ?? []).filter((a) => a.platform !== 'HUMAN'));
-  const byStatus = $derived(
-    Object.fromEntries(COLUMNS.map((c) => [c, (snapshot?.tasks ?? []).filter((t) => t.status === c)])) as Record<string, Task[]>,
-  );
+  const workers = $derived((snapshot?.agents ?? []).filter((a) => a.platform !== 'HUMAN'));
+  const byStatus = $derived(Object.fromEntries(COLUMNS.map((c) => [c, (snapshot?.tasks ?? []).filter((t) => t.status === c)])) as Record<string, Task[]>);
 
   async function load(): Promise<void> {
     const res = await fetch('/api/state', { credentials: 'same-origin' });
@@ -66,6 +74,17 @@
     }
     snapshot = (await res.json()) as Snapshot;
     auth = 'ok';
+    handleNotices();
+  }
+
+  // New things that need you: a desktop notification (if you switched them on) and a count in the tab title.
+  let seenNotices: Set<string> | null = null;
+  function handleNotices(): void {
+    const notices = snapshot?.notices ?? [];
+    const r = freshNotices(seenNotices, notices);
+    seenNotices = r.seen;
+    for (const n of r.fresh) announce(n);
+    document.title = titleFor(notices);
   }
 
   // Events arrive live; the snapshot is refreshed shortly after a burst so tasks/agents stay exact.
@@ -88,16 +107,27 @@
     };
   }
 
-  const time = (iso: string) => new Date(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const platformTone = (p: string) =>
-    p === 'CLAUDE_CODE' ? 'border-orange-600 text-orange-700 dark:text-orange-400' : p === 'ANTIGRAVITY' ? 'border-violet-600 text-violet-700 dark:text-violet-400' : 'border-teal-600 text-teal-700 dark:text-teal-400';
-
-  const usedBy = (agentId: string) => snapshot?.usage?.byAgent.find((u) => u.agentId === agentId);
   const locksOf = (taskId: string) => (snapshot?.leases ?? []).filter((l) => l.taskId === taskId);
   function releaseLocks(taskId: string): void {
     const n = locksOf(taskId).length;
     if (confirm(`Release the ${n} file lock${n === 1 ? '' : 's'} held for ${taskId}? The agent has to take them again before it can commit.`)) void control('/api/leases/release', { taskId });
   }
+
+  function navigate(v: View): void {
+    chosen = v;
+    window.scrollTo({ top: 0 });
+  }
+  /** "New mission" is a shortcut to the form at the top of Missions. */
+  async function newMission(): Promise<void> {
+    navigate('missions');
+    await tick();
+    document.getElementById('m-title')?.focus();
+  }
+  function pickTheme(t: ThemeChoice): void {
+    theme = t;
+    setTheme(t);
+  }
+  const togglePause = () => control('/api/dispatch', { paused: !snapshot?.dispatch?.paused });
 
   onMount(() => {
     void load().then(() => {
@@ -106,106 +136,107 @@
   });
 </script>
 
-<main class="mx-auto max-w-7xl px-4 py-6">
-  <header class="mb-6 flex flex-wrap items-baseline justify-between gap-2">
-    <div>
-      <h1 class="text-xl font-semibold tracking-tight">AgentMesh Cockpit</h1>
-      <p class="text-sm text-stone-500 dark:text-stone-400">
-        <span class={['mr-1.5 inline-block size-2 rounded-full align-middle', live ? 'bg-green-600' : 'bg-red-600']}></span>
-        {live ? 'live' : auth === 'ok' ? 'reconnecting…' : 'not connected'}
-        {#if snapshot?.dispatch?.paused}· <strong>dispatch paused</strong>{/if}
-      </p>
-    </div>
-    {#if snapshot?.dispatch}
-      <div class="flex items-center gap-2">
-        {#if controlError}<span role="alert" class="text-xs text-red-600">{controlError}</span>{/if}
-        <button class="rounded-lg border border-stone-300 px-3 py-1.5 text-sm font-medium hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800" onclick={() => control('/api/dispatch', { paused: !snapshot?.dispatch?.paused })}>
-          {snapshot.dispatch.paused ? 'Resume dispatching' : 'Pause dispatching'}
-        </button>
-      </div>
-    {/if}
-  </header>
-
-  {#if auth === 'login'}
-    <section class="rounded-xl border border-stone-200 bg-white p-6 dark:border-stone-800 dark:bg-stone-900">
+{#if auth === 'login'}
+  <main class="mx-auto max-w-xl px-4 py-16">
+    <h1 class="font-display text-3xl font-semibold">AgentMesh</h1>
+    <section class="mt-6 rounded-lg border border-stone-200 bg-white p-6 dark:border-stone-800 dark:bg-stone-900">
       <h2 class="font-semibold">Sign in</h2>
       <p class="mt-2 text-sm text-stone-600 dark:text-stone-300">
         Open the one-time login link printed in the terminal where you ran <code class="font-mono">agentmesh start</code>. Each link works once.
       </p>
     </section>
-  {:else if snapshot}
-    <div class="mb-4 flex flex-wrap gap-1 border-b border-stone-200 dark:border-stone-800" role="tablist" aria-label="Views">
-      {#each TABS as t (t.id)}
-        {@const n = t.id === 'missions' ? needsYou.missions : t.id === 'board' ? needsYou.board : 0}
-        <button role="tab" aria-selected={view === t.id} class={['-mb-px rounded-t-lg border border-b-0 px-4 py-2 text-sm font-medium', view === t.id ? 'border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900' : 'border-transparent text-stone-500 hover:text-stone-900 dark:hover:text-stone-100']} onclick={() => (chosen = t.id)}>
-          {t.label}{#if n} <span class="ml-1 rounded-full bg-amber-500 px-1.5 text-xs text-white" title="Needs you">{n}</span>{/if}
-        </button>
-      {/each}
-    </div>
-    {#if !snapshot.setup.project.landing}
-      <p class="mb-4 rounded-lg border border-red-500 bg-red-50 p-2 text-sm dark:bg-red-950">Nothing will be added to your main branch yet: tell AgentMesh how to check your project in <button class="underline" onclick={() => (chosen = 'setup')}>Setup</button>.</p>
-    {/if}
-    {#if view === 'missions'}
-      <Missions missions={snapshot.missions} agents={snapshot.agents} usage={snapshot.usage?.byMission ?? []} onChanged={() => void load()} />
-    {:else if view === 'setup'}
-      <Setup platforms={snapshot.setup.platforms} project={snapshot.setup.project} onChanged={() => void load()} />
-    {:else}
-    <section aria-label="Agents now" class="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {#each agentsHuman as agent (agent.id)}
-        <article class={['rounded-xl border-l-4 bg-white p-4 dark:bg-stone-900', platformTone(agent.platform)]}>
-          <div class="flex items-baseline justify-between gap-2">
-            <h2 class="font-semibold">{agent.name}</h2>
-            <span class="text-xs uppercase tracking-wide text-stone-500">{agent.status}</span>
-          </div>
-          <p class="mt-1 text-sm text-stone-800 dark:text-stone-200">{agent.doing ?? 'idle'}</p>
-          <p class="mt-1 text-xs text-stone-500">{agent.currentTaskId ? `Task ${agent.currentTaskId}` : 'No active task'}</p>
-          {#if usedBy(agent.id)}<p class="mt-1 text-xs text-stone-500" title="What the agent tool reported. Antigravity reports tokens but no cost.">Used: {formatUsage(usedBy(agent.id)!)}</p>{/if}
-          {#if agent.status === 'BUSY'}
-            <button class="mt-2 rounded-lg border border-red-300 px-2 py-1 text-xs text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950" onclick={() => control('/api/stop-run', { agentId: agent.id })}>Stop run</button>
-          {/if}
-        </article>
-      {/each}
-      {#each snapshot.dispatch?.backoffs ?? [] as b (b.platform)}
-        <article class="rounded-xl border border-amber-500 bg-amber-50 p-4 text-sm dark:bg-amber-950">
-          <strong>{b.platform}</strong> unavailable until {time(b.until)}<br /><span class="text-stone-600 dark:text-stone-300">{b.reason}</span>
-        </article>
-      {/each}
-    </section>
+  </main>
+{:else if snapshot}
+  <div class="min-h-screen lg:grid lg:grid-cols-[17rem_minmax(0,1fr)]">
+    <Sidebar
+      {view}
+      {badges}
+      onNavigate={navigate}
+      onNewMission={newMission}
+      projectName={snapshot.setup.project.name}
+      agentCount={workers.length}
+      version={snapshot.version}
+      {live}
+      paused={snapshot.dispatch ? snapshot.dispatch.paused : null}
+      onTogglePause={togglePause}
+      {theme}
+      onTheme={pickTheme}
+      error={controlError}
+    />
 
-    <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
-      <section aria-label="Tasks" class="grid content-start gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {#each COLUMNS.filter((c) => byStatus[c]?.length) as column (column)}
-          <div class="rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-800 dark:bg-stone-900">
-            <h2 class="mb-2 text-xs font-semibold uppercase tracking-wide text-stone-500">{column.replaceAll('_', ' ')} · {byStatus[column]?.length}</h2>
-            <ul class="grid gap-2">
-              {#each byStatus[column] ?? [] as task (task.id)}
-                <li class="rounded-lg border border-stone-200 p-2 text-sm dark:border-stone-800">
-                  <span class="font-mono text-xs text-stone-500">{task.id}</span>
-                  <div>{task.title}</div>
-                  <div class="text-xs text-stone-500">{task.assigned_agent_id ?? `suggested: ${task.suggested_owner ?? 'anyone'}`}</div>
-                  {#if locksOf(task.id).length}
-                    <div class="mt-1 text-xs text-stone-500" title={locksOf(task.id).map((l) => `${l.path} (${l.agentId})`).join('\n')}>
-                      {locksOf(task.id).length} file lock{locksOf(task.id).length === 1 ? '' : 's'}
-                      <button class="ml-1 underline" onclick={() => releaseLocks(task.id)}>Release</button>
-                    </div>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-          </div>
+    <main class="min-w-0 px-4 py-6 sm:px-8 lg:py-8">
+      <div class="mx-auto max-w-6xl">
+        {#if snapshot.setup.update.info?.newer}
+          <p class="mb-4 rounded-lg border border-amber-500 bg-amber-50 p-2 text-sm dark:bg-amber-950">AgentMesh {snapshot.setup.update.info.latest} is available (you have {snapshot.setup.update.info.current}). <button class="underline" onclick={() => navigate('setup')}>How to update</button>.</p>
+        {/if}
+        {#if !snapshot.setup.project.landing}
+          <p class="mb-4 rounded-lg border border-red-500 bg-red-50 p-2 text-sm dark:bg-red-950">Nothing will be added to your main branch yet: tell AgentMesh how to check your project in <button class="underline" onclick={() => navigate('setup')}>Setup</button>.</p>
+        {/if}
+
+        {#if view === 'home'}
+          <Home
+            connected={live}
+            agents={snapshot.agents}
+            tasks={snapshot.tasks}
+            missions={snapshot.missions}
+            notices={snapshot.notices}
+            schedules={snapshot.schedules}
+            usage={snapshot.usage?.byAgent ?? []}
+            runs={snapshot.dispatch?.recentRuns ?? []}
+            backoffs={snapshot.dispatch?.backoffs ?? []}
+            paused={Boolean(snapshot.dispatch?.paused)}
+            onNavigate={navigate}
+            onStop={(agentId) => void control('/api/stop-run', { agentId })}
+          />
+        {:else if view === 'missions'}
+          <Missions missions={snapshot.missions} agents={snapshot.agents} usage={snapshot.usage?.byMission ?? []} onChanged={() => void load()} />
+        {:else if view === 'runs'}
+          <Runs runs={snapshot.dispatch?.recentRuns ?? []} />
+        {:else if view === 'schedules' && snapshot.schedules}
+          <Schedules schedules={snapshot.schedules} agents={snapshot.agents} onChanged={() => void load()} />
+        {:else if view === 'setup'}
+          <Setup platforms={snapshot.setup.platforms} project={snapshot.setup.project} notifications={snapshot.setup.notifications} update={snapshot.setup.update} version={snapshot.version} playbooks={snapshot.playbooks} recipes={snapshot.setup.recipes} sandbox={snapshot.sandbox} onChanged={() => void load()} />
         {:else}
-          <p class="text-sm text-stone-500">No tasks yet.</p>
-        {/each}
-      </section>
+          <h1 class="mb-4 font-display text-2xl font-semibold">Board</h1>
+          <div class="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+            <section aria-label="Tasks" class="grid grid-cols-1 content-start gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+              {#each COLUMNS.filter((c) => byStatus[c]?.length) as column (column)}
+                <div class="rounded-lg border border-stone-200 bg-white p-3 dark:border-stone-800 dark:bg-stone-900">
+                  <h2 class="mb-2 text-sm font-semibold text-stone-600 dark:text-stone-300">{column.replaceAll('_', ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase())} <span class="font-normal text-stone-500">({byStatus[column]?.length})</span></h2>
+                  <ul class="grid grid-cols-1 gap-2">
+                    {#each byStatus[column] ?? [] as task (task.id)}
+                      <li class="rounded-md border border-stone-200 p-2 text-sm dark:border-stone-800">
+                        <span class="font-mono text-xs text-stone-500">{task.id}</span>
+                        <div>{task.title}</div>
+                        <div class="text-xs text-stone-500">{task.assigned_agent_id ?? `suggested: ${task.suggested_owner ?? 'anyone'}`}</div>
+                        {#if locksOf(task.id).length}
+                          <div class="mt-1 text-xs text-stone-500" title={locksOf(task.id).map((l) => `${l.path} (${l.agentId})`).join('\n')}>
+                            {locksOf(task.id).length} file lock{locksOf(task.id).length === 1 ? '' : 's'}
+                            <button class="ml-1 underline" onclick={() => releaseLocks(task.id)}>Release</button>
+                          </div>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
+              {:else}
+                <p class="text-sm text-stone-500">No tasks yet.</p>
+              {/each}
+            </section>
 
-      <aside class="grid content-start gap-6">
-        <Controls tasks={snapshot.tasks} questions={snapshot.openQuestions} agents={snapshot.agents} stuck={snapshot.dispatch?.stuck ?? []} onChanged={() => void load()} />
+            <aside class="grid grid-cols-1 content-start gap-6">
+              <Controls tasks={snapshot.tasks} questions={snapshot.openQuestions} agents={snapshot.agents} stuck={snapshot.dispatch?.stuck ?? []} onChanged={() => void load()} />
+              <Timeline events={snapshot.events} tasks={snapshot.tasks} agents={snapshot.agents} />
+            </aside>
+          </div>
+        {/if}
 
-        <Timeline events={snapshot.events} tasks={snapshot.tasks} agents={snapshot.agents} />
-      </aside>
-    </div>
-    {/if}
-  {:else}
-    <p class="text-sm text-stone-500">Loading…</p>
-  {/if}
-</main>
+        <div class="mt-10 lg:hidden">
+          <TitleBlock projectName={snapshot.setup.project.name} agentCount={workers.length} version={snapshot.version} {live} paused={snapshot.dispatch ? snapshot.dispatch.paused : null} onTogglePause={togglePause} {theme} onTheme={pickTheme} error={controlError} />
+        </div>
+      </div>
+    </main>
+  </div>
+{:else}
+  <p class="p-8 text-sm text-stone-500">Loading…</p>
+{/if}

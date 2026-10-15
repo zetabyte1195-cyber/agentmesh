@@ -3,16 +3,14 @@
 // project verification → fast-forward trunk FROM THE PRIMARY TREE → link-safe cleanup.
 // Never checks out trunk in a worktree, never update-refs a checked-out branch, never stashes,
 // resets or touches the Human's uncommitted work, never pushes.
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
 import { DAEMON_PRINCIPAL, type TaskStatus, resolveActorRole, validateTaskTransition } from '@agentmesh/core';
 import { type SqliteDatabase, withImmediateTransaction } from '../db/index.js';
 import { diffHash, patchId } from '../git/diff.js';
 import { GitError, git } from '../git/run-git.js';
 import type { WorktreeController } from '../git/worktrees.js';
 import type { LeaseArbiter } from '../leases/index.js';
+import { type CheckRunner, hostCheck } from '../review/check.js';
 
-const execAsync = promisify(exec);
 
 export type LandingOutcome =
   | 'LANDED' // on trunk, task COMMITTED, worktree and branch removed
@@ -42,6 +40,8 @@ export interface MergeQueueOptions {
    * only when the Human opted in (landWithoutVerify).
    */
   verifyCommand: string | null | (() => string | null);
+  /** Runs the check. Default: on this computer. Container mode can supply one that runs it in the container. */
+  runCheck?: CheckRunner;
   verifyTimeoutMs?: number;
   /**
    * True while an agent process still runs for the task (e.g. the auditor exiting after its verdict).
@@ -140,7 +140,7 @@ export class MergeQueue {
     const verifyCommand = typeof configured === 'function' ? configured() : configured;
     if (verifyCommand) {
       try {
-        await execAsync(verifyCommand, { cwd: wt, windowsHide: true, timeout: this.options.verifyTimeoutMs ?? 30 * 60_000, maxBuffer: 64 * 1024 * 1024 });
+        await (this.options.runCheck ?? hostCheck)(verifyCommand, { cwd: wt, timeoutMs: this.options.verifyTimeoutMs ?? 30 * 60_000, maxBuffer: 64 * 1024 * 1024 });
       } catch (err) {
         await this.restoreAudited(wt, task.head_commit);
         return this.setStatus(taskId, 'IN_PROGRESS', 'VERIFY_FAILED', `Verification failed after rebase: ${errText(err).slice(0, 2000)}`);

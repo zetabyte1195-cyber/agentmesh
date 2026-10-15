@@ -161,7 +161,7 @@ describe('P3.1 Cockpit Audit Probes', () => {
       expect(res.status).toBe(200);
 
       const data = JSON.parse(res.body) as Record<string, unknown>;
-      expect(Object.keys(data).sort()).toEqual(['agents', 'dispatch', 'events', 'leases', 'missions', 'openQuestions', 'tasks', 'usage']);
+      expect(Object.keys(data).sort()).toEqual(['agents', 'dispatch', 'events', 'leases', 'missions', 'notices', 'openQuestions', 'playbooks', 'sandbox', 'schedules', 'tasks', 'usage']);
 
       // Ensure no tokens/credentials appear in the returned state
       expect(res.body).not.toMatch(/amt_[A-Za-z0-9_-]{20,}/);

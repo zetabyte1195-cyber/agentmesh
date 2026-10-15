@@ -19,6 +19,12 @@ if (major < 22) {
   process.exit(1);
 }
 
+// `update` runs before anything is loaded: on Windows npm cannot replace the database engine while it is open.
+if (process.argv[2] === 'update') {
+  const { runUpdate } = await import('./update.mjs');
+  process.exit(await runUpdate(process.argv.slice(3), packageDir));
+}
+
 function sqliteProblem() {
   try {
     const Database = createRequire(import.meta.url)('better-sqlite3');

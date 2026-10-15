@@ -323,7 +323,7 @@
   <!-- Header with title, live counters, view mode & maximize toggles -->
   <header class="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 pb-3 dark:border-stone-800">
     <div class="flex items-center gap-2">
-      <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-stone-400">Interaction Timeline</h2>
+      <h2 class="font-display text-lg font-semibold">Timeline</h2>
       <span class="rounded-full bg-stone-100 px-2 py-0.5 text-xs font-medium text-stone-600 dark:bg-stone-800 dark:text-stone-300">
         {filteredEvents.length} {filteredEvents.length === 1 ? 'event' : 'events'}
       </span>
@@ -514,7 +514,7 @@
                     {thread.taskId === 'general' ? 'General' : thread.taskId}
                   </span>
                   {#if thread.status}
-                    <span class={['rounded px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wider', statusBadgeClasses(thread.status)]}>
+                    <span class={['rounded px-1.5 py-0.5 text-xs font-semibold', statusBadgeClasses(thread.status)]}>
                       {thread.status}
                     </span>
                   {/if}

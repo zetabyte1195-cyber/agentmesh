@@ -130,7 +130,7 @@ Lost the page, or the link says it was already used? Run `agentmesh login` for a
    - **Another review round**, or
    - write what to change and press **Ask for these changes**.
 5. After you approve, the agents split the plan into tasks and build them, each on its own branch. Each task is reviewed by an agent from the other company (or by you, with one tool), checked, and merged into your main branch.
-6. Keep an eye on the **Board** tab: questions for you and anything an agent gave up on appear under **Needs you**.
+6. Keep an eye on **Home**: a plan to read, a question for you, or anything an agent gave up on appears there, and the **Missions** and **Board** tabs show a number when something is waiting. To be told while you are away from the page, switch on notifications in **Setup** (under **Tell me when something needs me**).
 
 When the mission says **Done**, the finished work is in your folder as ordinary git commits.
 
@@ -144,10 +144,15 @@ When the mission says **Done**, the finished work is in your folder as ordinary 
 | `agentmesh dispatch pause` / `resume` | Stop / restart handing out work. |
 | `agentmesh stop` | Stop everything. Nothing is lost. |
 | `agentmesh doctor` | Check that everything still works. |
+| `agentmesh update` | Install the newest release (asks first). |
 
 ## Updating
 
-Run the install command from step 3 again. Your projects' data upgrades itself the next time you start AgentMesh.
+Run `agentmesh update`. It looks for a newer release on GitHub, tells you what it found, and asks before installing. `agentmesh update --check` only looks.
+
+Versions before 0.2.0 do not have this command yet: run the install command from step 3 again instead. Either way, your projects' data upgrades itself the next time you start AgentMesh.
+
+AgentMesh never looks for updates by itself unless you switch on **Check once a day** under **Updates** in **Setup**.
 
 ## Removing
 
@@ -166,7 +171,7 @@ Run the install command from step 3 again. Your projects' data upgrades itself t
 | "Nothing will be added to your main branch" | Set how to check your project in **Setup**. |
 | The port is in use or reserved (Windows reserves some) | `agentmesh start --port 8944` |
 | "AgentMesh's database engine does not work" | `agentmesh repair` |
-| An agent **gave up** on something | Read the reason under **Needs you**, fix it (answer, message the agent, or change the task), then **Try again**. |
+| An agent **gave up** on something | Read the reason on **Home** (or under **Needs you** on the **Board**), fix it (answer, message the agent, or change the task), then **Try again**. |
 | An agent's quota ran out | It pauses by itself until the quota resets; the others carry on. |
 | A task is stuck with file locks | **Stop run** on the agent's card, then **Release** on the task card. |
 

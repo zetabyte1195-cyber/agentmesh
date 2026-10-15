@@ -17,7 +17,13 @@ import { dashboardDist } from '../paths.js';
 import { removeDaemonRecord, writeDaemonRecord } from './runtime.js';
 import { handleMcpHttp } from '../mcp/index.js';
 import { MergeQueue } from '../merge/index.js';
-import { MISSION_MIGRATION, MissionService } from '../missions/index.js';
+import { MISSION_MIGRATION, MissionService, TemplateStore } from '../missions/index.js';
+import { Notifier } from '../notify/index.js';
+import { PlaybookStore } from '../playbooks/index.js';
+import type { CheckRunner } from '../review/check.js';
+import { SandboxRuntime, lintWrapper, parseSandbox } from '../sandbox/index.js';
+import { SCHEDULE_MIGRATION, ScheduleService } from '../schedules/index.js';
+import { UpdateChecker } from '../update/index.js';
 import { ReviewService } from '../review/index.js';
 import { CommitService } from '../work/index.js';
 import { DEFAULT_CLAUDE_ALLOWED_TOOLS, createRegistry } from '../platforms/index.js';
@@ -33,6 +39,7 @@ export interface StartOptions {
   autoDispatch?: boolean;
   dispatchIntervalMs?: number;
   landingIntervalMs?: number;
+  scheduleIntervalMs?: number;
   /** Override the port from config (tests use 0). */
   port?: number;
   claudeAllowedTools?: readonly string[];
@@ -44,6 +51,8 @@ export interface StartOptions {
    * status / dispatch` can reach it. The CLI turns this on; tests leave it off.
    */
   record?: boolean;
+  /** The running AgentMesh version (shown in Setup, compared by the update check). */
+  version?: string;
   /** Where the record goes (tests). Default ~/.agentmesh/daemons. */
   runtimeDir?: string;
 }
@@ -58,6 +67,9 @@ export interface RunningDaemon {
   leases: LeaseArbiter;
   dispatcher: Dispatcher;
   missions: MissionService;
+  notifier: Notifier;
+  updates: UpdateChecker;
+  schedules: ScheduleService;
   mergeQueue: MergeQueue | null;
   /** Resolves when the Human asked the daemon to stop (agentmesh stop). */
   stopRequested: Promise<void>;
@@ -77,9 +89,12 @@ export async function startDaemon(options: StartOptions): Promise<RunningDaemon>
     throw new Error(`Unsupported platform in .agentmesh/config.json: ${unsupported.map((a) => `${a.id} (${a.platform})`).join(', ')}. Known: ${registry.list().map((p) => p.id).join(', ')}. Define others under "customPlatforms".`);
   }
 
+  // Container mode: an invalid section stops AgentMesh from starting. It must never fall back to running agents outside a container.
+  const sandboxConfig = parseSandbox(config.sandbox);
+
   // 1. State: migrations 1 (schema), 2 (credentials), 3 (dispatch), 4 (missions).
   const db = openDatabase(join(root, '.agentmesh', 'mesh.db'));
-  migrate(db, [...MIGRATIONS, IDENTITY_MIGRATION, DISPATCH_MIGRATION, MISSION_MIGRATION, USAGE_MIGRATION]);
+  migrate(db, [...MIGRATIONS, IDENTITY_MIGRATION, DISPATCH_MIGRATION, MISSION_MIGRATION, USAGE_MIGRATION, SCHEDULE_MIGRATION]);
   const identity = new IdentityService(db);
   const exists = (id: string) => Boolean(db.prepare('SELECT 1 FROM agents WHERE id = ?').get(id));
   if (!exists(HUMAN_AGENT_ID)) identity.registerAgent({ id: HUMAN_AGENT_ID, name: 'Human', platform: 'HUMAN', paradigm: 'HUMAN' });
@@ -99,12 +114,30 @@ export async function startDaemon(options: StartOptions): Promise<RunningDaemon>
   const leases = new LeaseArbiter(db);
   const gate = new AuditGate({ db, repoRoot: root, leases });
   // Read the project check each time: the Human can change it in the cockpit while the daemon runs.
-  const review = new ReviewService({ db, verifyCommand: () => config.verifyCommand });
+  // With container mode's "checks": "container" the check runs in a container, not on this computer (code an agent writes must not
+  // run here). The runner is set once the container runtime exists; until then, and if it is ever missing, the check FAILS rather
+  // than quietly running on the host.
+  let containerCheck: CheckRunner | null = null;
+  const runCheck: CheckRunner | undefined =
+    sandboxConfig?.checks === 'container' ? (c, o) => (containerCheck ? containerCheck(c, o) : Promise.reject(Object.assign(new Error('Container mode is not ready, so the project check was not run.'), { code: 1, killed: false, stdout: '', stderr: '' }))) : undefined;
+  const review = new ReviewService({ db, verifyCommand: () => config.verifyCommand, ...(runCheck ? { runCheck } : {}) });
   const commits = new CommitService({ db, leases });
-  const services = { board, leases, gate, review, commits, missions };
+  const playbooks = new PlaybookStore(join(root, '.agentmesh', 'playbooks'));
+  const services = { board, leases, gate, review, commits, missions, playbooks };
   server.route('POST', '/mcp', 'agent', async ({ req, res, principal, body }) => handleMcpHttp(req, res, principal!, await body(), services));
   const port = await server.listen();
   const mcpUrl = `http://127.0.0.1:${port}/mcp`;
+  // Containers cannot reach the loopback-only server, so container mode serves the MCP endpoint (and nothing else) on its own listener.
+  const sandbox = sandboxConfig
+    ? new SandboxRuntime({ cfg: sandboxConfig, repoRoot: root, identity, handler: (req, res, principal, body) => handleMcpHttp(req, res, principal, body, services), log })
+    : null;
+  if (sandbox) {
+    containerCheck = sandbox.checkRunner();
+    await sandbox.start();
+    const blocked = sandbox.blockedReason();
+    log(`Container mode (experimental): agents${sandboxConfig!.agents ? ` ${sandboxConfig!.agents.join(', ')}` : ''} run in containers; they reach AgentMesh at ${sandbox.mcpUrl()}.${blocked ? ` BLOCKED: ${blocked}` : ''}`);
+    for (const w of lintWrapper(sandboxConfig!)) log(`Container mode warning: ${w}`);
+  }
 
   // 3. Headless agents: each run gets its own MCP config (token inside) outside the repo.
   const allowed = options.claudeAllowedTools ?? DEFAULT_CLAUDE_ALLOWED_TOOLS;
@@ -123,14 +156,18 @@ export async function startDaemon(options: StartOptions): Promise<RunningDaemon>
   // The daemon claims TASK work itself and starts the agent inside the new worktree (live AC-8 run #1).
   const claim = async (principal: Parameters<BoardService['claimTask']>[0], taskId: string) => ({ worktree: (await board.claimTask(principal, taskId)).worktree });
   const scratch = { create: (name: string) => worktrees.createScratch(name), remove: (path: string) => worktrees.removeScratch(path) };
-  const dispatcher = new Dispatcher({ db, identity, leases, agents, repoRoot: root, mcpUrl, claim, missions, scratch, runTimeoutMs: 45 * 60_000 });
-  registerCockpit({ server, board, db, dispatcher, missions, leases, extra: () => setupState({ config, registry, root }) });
-  registerControls({ server, board, gate, review, dispatcher, missions, leases });
-  registerSetup({ server, board, identity, dispatcher, registry, root, config, allowedTools: allowed });
+  const dispatcher = new Dispatcher({ db, identity, leases, agents, repoRoot: root, mcpUrl, claim, missions, scratch, runTimeoutMs: 45 * 60_000, context: () => config.projectContext, playbooks: (n) => playbooks.catalogue(n), ...(sandbox ? { sandbox } : {}) });
+  // Both read the config each time they run, so changing them in the cockpit needs no restart.
+  const notifier = new Notifier({ db, missions, dispatcher, config: () => config.notifications, cockpitUrl: () => `http://127.0.0.1:${port}` });
+  const schedules = new ScheduleService({ db, missions, board, connectedAgents: () => dispatcher.agentIds(), isPaused: () => dispatcher.isPaused() });
+  const updates = new UpdateChecker({ current: options.version ?? '0.0.0', enabled: () => Boolean(config.updateCheck) });
+  registerCockpit({ server, board, db, dispatcher, missions, leases, playbooks, schedules, ...(sandbox ? { sandbox } : {}), extra: () => ({ ...setupState({ config, registry, root, notifier, updates }), version: options.version ?? null }) });
+  registerControls({ server, board, gate, review, dispatcher, missions, leases, templates: new TemplateStore(join(root, '.agentmesh')), playbooks, schedules });
+  registerSetup({ server, board, identity, dispatcher, registry, root, config, allowedTools: allowed, notifier, updates });
 
   // 4. The merge queue always exists; it lands only while the Human has set a check (or opted in to landing
   //    without one), and the Human can change that in the cockpit without restarting.
-  const mergeQueue = new MergeQueue({ db, repoRoot: root, trunk: config.trunk, worktrees, leases, verifyCommand: () => config.verifyCommand || null, isTaskBusy: (id) => dispatcher.isTaskBusy(id) });
+  const mergeQueue = new MergeQueue({ db, repoRoot: root, trunk: config.trunk, worktrees, leases, verifyCommand: () => config.verifyCommand || null, ...(runCheck ? { runCheck } : {}), isTaskBusy: (id) => dispatcher.isTaskBusy(id) });
   const landingEnabled = () => Boolean(config.verifyCommand || config.landWithoutVerify);
 
   // 5. Crash recovery, then the schedules.
@@ -138,7 +175,22 @@ export async function startDaemon(options: StartOptions): Promise<RunningDaemon>
   const { orphaned, missing } = await worktrees.reconcile(live);
   if (orphaned.length || missing.length) log(`Worktree reconcile: ${orphaned.length} orphaned, ${missing.length} missing (see the cockpit).`);
   await worktrees.cleanScratch(); // planning checkouts left by a crash or a stop
-  if (options.autoDispatch ?? true) dispatcher.start(options.dispatchIntervalMs ?? 15_000);
+  await sandbox?.sweep(); // containers a crashed AgentMesh left behind
+  if (options.autoDispatch ?? true) {
+    dispatcher.start(options.dispatchIntervalMs ?? 15_000);
+    notifier.start();
+    updates.start();
+  }
+  // Schedules are checked every 30 seconds (and once now, so a slot missed while AgentMesh was off fires on start).
+  const runSchedules = () => {
+    try {
+      schedules.tick();
+    } catch (err) {
+      log(`Schedules: ${(err as Error).message}`);
+    }
+  };
+  const scheduleTimer = (options.autoDispatch ?? true) ? setInterval(runSchedules, options.scheduleIntervalMs ?? 30_000) : null;
+  if (scheduleTimer) runSchedules();
   const landing = setInterval(() => {
     if (!landingEnabled()) return;
     void mergeQueue.processNext().then((r) => {
@@ -175,10 +227,18 @@ export async function startDaemon(options: StartOptions): Promise<RunningDaemon>
     leases,
     dispatcher,
     missions,
+    notifier,
+    updates,
+    schedules,
     mergeQueue,
     stopRequested,
     stop: async () => {
       dispatcher.stop();
+      notifier.stop();
+      updates.stop();
+      await sandbox?.stopAll();
+      await sandbox?.close();
+      if (scheduleTimer) clearInterval(scheduleTimer);
       clearInterval(landing);
       if (cliToken) {
         identity.revokeToken(cliToken);

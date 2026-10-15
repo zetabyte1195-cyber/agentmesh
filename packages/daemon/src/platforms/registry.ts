@@ -9,12 +9,14 @@ export interface PlatformRegistry {
   get(id: string): PlatformAdapter | undefined;
   has(id: string): boolean;
   list(): PlatformAdapter[];
+  /** Define another platform while AgentMesh runs (adding a recipe from the cockpit). Throws on an invalid or duplicate one. */
+  add(config: CustomPlatformConfig): PlatformAdapter;
 }
 
 /** The built-ins plus any platforms defined in config. Throws on an invalid or duplicate definition. */
 export function createRegistry(custom: readonly CustomPlatformConfig[] = []): PlatformRegistry {
   const map = new Map<string, PlatformAdapter>(BUILTIN_PLATFORMS.map((p) => [p.id, p]));
-  for (const c of custom) {
+  const define = (c: CustomPlatformConfig): PlatformAdapter => {
     let adapter: PlatformAdapter;
     try {
       adapter = customAdapter(c);
@@ -25,6 +27,8 @@ export function createRegistry(custom: readonly CustomPlatformConfig[] = []): Pl
     }
     if (map.has(adapter.id)) throw new Error(`Platform "${adapter.id}" is defined twice`);
     map.set(adapter.id, adapter);
-  }
-  return { get: (id) => map.get(id), has: (id) => map.has(id), list: () => [...map.values()] };
+    return adapter;
+  };
+  for (const c of custom) define(c);
+  return { get: (id) => map.get(id), has: (id) => map.has(id), list: () => [...map.values()], add: define };
 }

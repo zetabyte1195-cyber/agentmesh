@@ -1,5 +1,7 @@
 // Normalized events from headless agent runs. Claude Code and Antigravity (agy) emit
 // different stream-json schemas (verified; see board findings on P2.2); both map to this.
+import { createHash } from 'node:crypto';
+import { inputSignature, stableHash } from './loop.js';
 
 export interface RunUsage {
   inputTokens: number;
@@ -11,7 +13,10 @@ export interface RunUsage {
 export type RunnerEvent =
   | { kind: 'init'; sessionId: string | null; model: string | null }
   | { kind: 'text'; text: string }
-  | { kind: 'tool_use'; name: string }
+  /** `id` and `inputHash` (the input without its prose description) let a result be paired with its call. Claude only: agy gives null. */
+  | { kind: 'tool_use'; name: string; id?: string | null; inputHash?: string }
+  /** A tool's result, paired by `id` with its tool_use (Claude stream-json; the wording was confirmed on a real run). */
+  | { kind: 'tool_result'; id: string | null; isError: boolean; outputHash: string }
   | {
       kind: 'result';
       ok: boolean;
@@ -43,8 +48,20 @@ export function parseClaudeEvent(e: Json): RunnerEvent[] {
       return content.flatMap((c): RunnerEvent[] => {
         const part = obj(c);
         if (part.type === 'text' && typeof part.text === 'string') return [{ kind: 'text', text: part.text }];
-        if (part.type === 'tool_use') return [{ kind: 'tool_use', name: String(part.name) }];
+        if (part.type === 'tool_use') return [{ kind: 'tool_use', name: String(part.name), id: str(part.id), inputHash: inputSignature(part.input) }];
         return [];
+      });
+    }
+    case 'user': {
+      // Tool results come back as a user message: content is [{ type: 'tool_result', tool_use_id, content, is_error }]
+      const content = obj(e.message).content;
+      if (!Array.isArray(content)) return [];
+      return content.flatMap((c): RunnerEvent[] => {
+        const part = obj(c);
+        if (part.type !== 'tool_result') return [];
+        // content is a string, or a list of { type: 'text', text } blocks
+        const text = Array.isArray(part.content) ? part.content.map((b) => str(obj(b).text) ?? '').join('\n') : (str(part.content) ?? stableHash(part.content));
+        return [{ kind: 'tool_result', id: str(part.tool_use_id), isError: part.is_error === true, outputHash: createHash('sha256').update(text).digest('hex').slice(0, 16) }];
       });
     }
     case 'result': {

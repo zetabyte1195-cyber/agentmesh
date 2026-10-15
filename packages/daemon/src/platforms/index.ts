@@ -3,3 +3,4 @@ export * from './resolve.js';
 export * from './builtin.js';
 export * from './custom.js';
 export * from './registry.js';
+export * from './recipes.js';

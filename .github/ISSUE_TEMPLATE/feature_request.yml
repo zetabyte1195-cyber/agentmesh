@@ -1,0 +1,27 @@
+name: An idea
+description: Something AgentMesh could do, or do better
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please look at ROADMAP.md first: it lists what is planned and what is deliberately not.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem you have
+      description: What are you trying to do, and what gets in the way? The problem helps more than the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like to happen
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead
+    validations:
+      required: false

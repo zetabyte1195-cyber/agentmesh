@@ -65,6 +65,17 @@ describe('ReviewService', () => {
     await expect(svc.getDiff(gemini, 'nope')).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
+  it('runs the check through an injected runner (container mode), never on this computer, and reports its pass/fail the same way', async () => {
+    await submit();
+    const calls: { command: string; cwd: string }[] = [];
+    const ran = new ReviewService({ db, verifyCommand: 'npm test', runCheck: async (command, o) => (calls.push({ command, cwd: o.cwd }), { stdout: 'all 3 passed', stderr: '' }) });
+    expect(await ran.runVerification(gemini, 'T1')).toMatchObject({ ok: true, output: 'all 3 passed' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.command).toBe('npm test');
+    const failed = await new ReviewService({ db, verifyCommand: 'npm test', runCheck: async () => { throw Object.assign(new Error('x'), { code: 3, killed: false, stdout: 'out', stderr: '2 failed' }); } }).runVerification(gemini, 'T1');
+    expect(failed).toMatchObject({ ok: false, exitCode: 3, output: 'out2 failed' });
+  });
+
   it('runs the CONFIGURED command in the worktree and reports pass/fail with output', async () => {
     await submit();
     const pass = await new ReviewService({ db, verifyCommand: 'node -e "console.log(require(\'fs\').readFileSync(\'b.txt\',\'utf8\'))"' }).runVerification(gemini, 'T1');

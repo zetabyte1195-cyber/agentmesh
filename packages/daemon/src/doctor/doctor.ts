@@ -10,6 +10,7 @@ import { InitError, type ProjectConfig, requireGitIdentity } from '../init/init.
 import { dashboardDist } from '../paths.js';
 import { AGY_MCP_RULE, type CheckLevel, type Diagnosis, type PlatformAdapter, type PlatformRegistry, createRegistry, ensureAgyMcpRule } from '../platforms/index.js';
 import { type InstallStep, gitInstallHint, gitInstaller, landedOffPath, platformInstaller, runInstall } from './install.js';
+import { type SandboxConfig, SandboxConfigError, parseSandbox, probeSandbox, sandboxApplies } from '../sandbox/index.js';
 import { smokeTestPlatform } from './smoke.js';
 
 export type DoctorCheck = Diagnosis;
@@ -145,9 +146,31 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const dash = dashboardDist();
   add(existsSync(join(dash, 'index.html')) ? check('ok', 'Cockpit files found', dash) : check('fail', 'The cockpit has not been built', dash, 'npm run build   (from the AgentMesh folder)'));
 
+  // Container mode (experimental): checked for real, through the real wrapper.
+  let sandbox: SandboxConfig | null = null;
+  if (config?.sandbox !== undefined) {
+    try {
+      sandbox = parseSandbox(config.sandbox);
+      if (!sandbox) add(check('info', 'Container mode is switched off', '"enabled": false in the "sandbox" section.'));
+    } catch (err) {
+      add(check('fail', 'The "sandbox" section is not valid', err instanceof SandboxConfigError ? err.message : (err as Error).message, 'Fix it in .agentmesh/config.json. AgentMesh will not start while it is wrong: it never falls back to running agents outside the container.'));
+    }
+  }
+  if (sandbox && root && config) {
+    const builtIn: Record<string, string> = { CLAUDE_CODE: 'claude', ANTIGRAVITY: 'agy' };
+    const commands = [...new Set(config.agents.filter((a) => sandboxApplies(sandbox!, a.id)).map((a) => sandbox!.commands?.[a.platform] ?? builtIn[a.platform]).filter((c): c is string => Boolean(c)))];
+    progress('Checking container mode (starts a few short containers)...');
+    for (const d of await probeSandbox({ cfg: sandbox, repoRoot: root, commands })) add(d);
+  }
+
   // Platforms: the ones this project uses, or all of them when there is no config yet.
   const used = config ? [...new Set(config.agents.map((a) => a.platform))].map((id) => registry.get(id)).filter((p): p is PlatformAdapter => Boolean(p)) : registry.list();
   for (const adapter of used) {
+    // A tool that only runs in the container is checked there (above), not on this computer.
+    if (sandbox && config && config.agents.filter((a) => a.platform === adapter.id).every((a) => sandboxApplies(sandbox!, a.id))) {
+      add(check('info', `${adapter.label} runs in the container`, 'It is checked inside the image (above), not on this computer.'));
+      continue;
+    }
     let d = await adapter.detect();
     if (!d.installed) {
       const step = platformInstaller(adapter.id);

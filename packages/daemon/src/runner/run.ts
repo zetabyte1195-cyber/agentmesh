@@ -6,6 +6,7 @@ import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import type { AgentCommand } from './commands.js';
 import { LineSplitter, type RunnerEvent } from './events.js';
+import { DEFAULT_LOOP_THRESHOLD, LoopDetector } from './loop.js';
 
 export type ResultEvent = Extract<RunnerEvent, { kind: 'result' }>;
 
@@ -20,6 +21,12 @@ export interface RunOptions {
   /** Called every intervalMs while the process runs (lease renewal). */
   heartbeat?: { intervalMs: number; beat: () => void };
   timeoutMs?: number;
+  /** Stop the run when the agent makes the same tool call with the same result this many times in a row. 0 turns it off. Default 3. */
+  loopThreshold?: number;
+  /** Called first when the run is stopped or times out, before the process is killed (container mode: remove the container by name). */
+  terminate?: () => Promise<void>;
+  /** Called once when the run has ended, however it ended. Never throws. */
+  cleanup?: () => Promise<void>;
 }
 
 export interface RunResult {
@@ -33,6 +40,8 @@ export interface RunResult {
   failure: string | null;
   stderrTail: string[];
   heartbeatErrors: number;
+  /** Set when the run was stopped for repeating itself: "no_progress: ..." (the reason is also `failure`). */
+  noProgress: string | null;
 }
 
 export interface RunningAgent {
@@ -111,6 +120,8 @@ export function startAgent(options: RunOptions): RunningAgent {
   let stopped = false;
   let timedOut = false;
   let heartbeatErrors = 0;
+  let noProgress: string | null = null;
+  const loop = new LoopDetector(options.loopThreshold ?? DEFAULT_LOOP_THRESHOLD);
 
   const child = spawn(command.executable, command.args, {
     cwd: options.cwd,
@@ -142,6 +153,13 @@ export function startAgent(options: RunOptions): RunningAgent {
     for (const event of command.parse(parsed as Record<string, unknown>)) {
       if (event.kind === 'result') result = event;
       options.onEvent?.(event);
+      if (!noProgress) {
+        const looping = loop.observe(event);
+        if (looping) {
+          noProgress = looping;
+          void stop(); // a function declaration below: safe to call from here
+        }
+      }
     }
   };
   const handleStderrLine = (line: string) => {
@@ -163,10 +181,12 @@ export function startAgent(options: RunOptions): RunningAgent {
       }, options.heartbeat.intervalMs)
     : null;
 
-  const stop = async () => {
+  async function stop(): Promise<void> {
     stopped = true;
+    // Killing a `docker run` client does not stop its container, so the container goes first.
+    await options.terminate?.().catch(() => undefined);
     await killTree(child);
-  };
+  }
   const timer = options.timeoutMs
     ? setTimeout(() => {
         timedOut = true;
@@ -181,6 +201,7 @@ export function startAgent(options: RunOptions): RunningAgent {
       finished = true;
       if (beat) clearInterval(beat);
       if (timer) clearTimeout(timer);
+      void options.cleanup?.().catch(() => undefined);
       splitter.flush().forEach(handleStdoutLine);
       stderrSplitter.flush().forEach(handleStderrLine);
       // Plain-text tools have no result event: a clean exit is the result, and stdout is its text.
@@ -194,13 +215,14 @@ export function startAgent(options: RunOptions): RunningAgent {
         // Node reports a missing working folder as ENOENT for the program; say which one is really missing.
         failure = !existsSync(options.cwd) ? `could not start ${command.executable}: its working folder does not exist (${options.cwd})` : `could not start ${command.executable}: ${spawnError.message}`;
       }
+      else if (noProgress) failure = noProgress;
       else if (timedOut) failure = `timed out after ${options.timeoutMs} ms`;
       else if (stopped) failure = 'stopped';
       else if (exitCode !== 0) failure = `exited with code ${exitCode}`;
       else if (!final) failure = 'exited without a result event';
       else if (!final.ok) failure = 'agent reported failure';
       else if (final.denied?.length) failure = `refused by the agent's permission rules: ${final.denied.join(', ')} (the run ended there)`;
-      resolve({ ok: failure === null, exitCode, timedOut, stopped, result: final, failure, stderrTail, heartbeatErrors });
+      resolve({ ok: failure === null, exitCode, timedOut, stopped, result: final, failure, stderrTail, heartbeatErrors, noProgress });
     };
     child.on('error', (err) => finish(null, err));
     child.on('close', (code) => finish(code));

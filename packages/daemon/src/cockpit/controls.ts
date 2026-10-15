@@ -5,8 +5,10 @@ import { z } from 'zod';
 import { type AuditGate, AuditGateError } from '../audit/index.js';
 import { BoardError, type BoardService } from '../board/index.js';
 import type { Dispatcher } from '../dispatch/index.js';
-import { MissionError, type MissionService } from '../missions/index.js';
+import { BUILT_IN_TEMPLATES, MissionError, type MissionService, TemplateError, type TemplateStore } from '../missions/index.js';
 import type { Principal } from '../identity/index.js';
+import { PlaybookError, type PlaybookStore } from '../playbooks/index.js';
+import { ScheduleError, type ScheduleInput, type ScheduleService } from '../schedules/index.js';
 import type { LeaseArbiter } from '../leases/index.js';
 import { ReviewError, type ReviewService } from '../review/index.js';
 import { type DaemonServer, HttpError } from '../server/index.js';
@@ -19,6 +21,9 @@ export interface ControlsOptions {
   dispatcher?: Dispatcher;
   missions?: MissionService;
   leases?: LeaseArbiter;
+  templates?: TemplateStore;
+  playbooks?: PlaybookStore;
+  schedules?: ScheduleService;
 }
 
 const TaskId = z.string().min(1).max(64);
@@ -40,7 +45,7 @@ async function parse<T extends z.ZodTypeAny>(schema: T, body: () => Promise<stri
  * schema trigger/constraint (SQLITE_CONSTRAINT_*). Anything else is a bug and is rethrown as a 500
  * whose message stays out of the response (Gemini, P3.3 audit: the old name/regex match did both wrong).
  */
-const REFUSALS = [BoardError, AuditGateError, ReviewError, MissionError] as const;
+const REFUSALS = [BoardError, AuditGateError, ReviewError, MissionError, TemplateError, PlaybookError, ScheduleError] as const;
 async function act<T>(fn: () => T | Promise<T>): Promise<T> {
   try {
     return await fn();
@@ -121,6 +126,14 @@ export function registerControls(o: ControlsOptions): void {
       }),
       body,
     );
+    // The planner and reviewers must be agents the dispatcher can actually run. An agent that is only a row in the
+    // database (removed from the configuration) would be given the work and never do it.
+    if (o.dispatcher) {
+      const connected = o.dispatcher.agentIds();
+      for (const id of [b.plannerAgentId, ...(b.reviewerAgentIds ?? [])]) {
+        if (!connected.includes(id)) throw new HttpError(409, `${id} is not a connected agent, so it cannot take part. Connected: ${connected.join(', ') || 'none'}.`);
+      }
+    }
     return act(() => missions().create(human(principal), { title: b.title, brief: b.brief, plannerAgentId: b.plannerAgentId, ...(b.reviewerAgentIds ? { reviewerAgentIds: b.reviewerAgentIds } : {}), ...(b.maxRounds ? { maxRounds: b.maxRounds } : {}) }));
   });
   o.server.route('POST', '/api/missions/approve', 'human', async ({ principal, body }) => {
@@ -162,6 +175,104 @@ export function registerControls(o: ControlsOptions): void {
     const released = o.leases.releaseAllForTask(b.taskId);
     if (released) o.board.recordControl(human(principal), `released ${released} file lock${released === 1 ? '' : 's'} held for task ${b.taskId}`, b.taskId);
     return { released };
+  });
+
+  // Starter briefs: the built-in ones, and the ones this person saved.
+  o.server.route('GET', '/api/templates', 'human', () => ({ builtIn: BUILT_IN_TEMPLATES, mine: o.templates?.list() ?? [] }));
+  o.server.route('POST', '/api/templates/save', 'human', async ({ principal, body }) => {
+    const b = await parse(z.object({ title: z.string().trim().min(1).max(80), brief: z.string().trim().min(10).max(20_000) }), body);
+    if (!o.templates) throw new HttpError(503, 'Templates are not available');
+    const t = await act(() => o.templates!.save(b.title, b.brief));
+    o.board.recordControl(human(principal), `saved the mission template "${t.title}"`);
+    return t;
+  });
+  o.server.route('POST', '/api/templates/delete', 'human', async ({ principal, body }) => {
+    const b = await parse(z.object({ id: z.string().min(1).max(40) }), body);
+    if (!o.templates) throw new HttpError(503, 'Templates are not available');
+    await act(() => o.templates!.remove(b.id));
+    o.board.recordControl(human(principal), 'deleted one of my mission templates');
+    return { ok: true };
+  });
+
+  // Playbooks: reusable instructions agents read on demand (see playbooks/store.ts).
+  const playbooks = () => {
+    if (!o.playbooks) throw new HttpError(503, 'Playbooks are not available');
+    return o.playbooks;
+  };
+  o.server.route('POST', '/api/playbooks/get', 'human', async ({ body }) => {
+    const b = await parse(z.object({ name: z.string().min(1).max(40) }), body);
+    return act(() => playbooks().get(b.name));
+  });
+  o.server.route('POST', '/api/playbooks/save', 'human', async ({ principal, body }) => {
+    const b = await parse(z.object({ name: z.string().min(1).max(40), description: z.string().min(1).max(500), body: z.string().min(1).max(60_000) }), body);
+    const meta = await act(() => playbooks().save(b));
+    o.board.recordControl(human(principal), `saved the playbook "${meta.name}"`);
+    return meta;
+  });
+  o.server.route('POST', '/api/playbooks/delete', 'human', async ({ principal, body }) => {
+    const b = await parse(z.object({ name: z.string().min(1).max(40) }), body);
+    await act(() => playbooks().remove(b.name));
+    o.board.recordControl(human(principal), `deleted the playbook "${b.name}"`);
+    return { ok: true };
+  });
+
+  // ── schedules: start a mission on a timer or when another finishes. They only ever create a mission,
+  //    which then waits for the Human's approval like any other. ──
+  const schedules = () => {
+    if (!o.schedules) throw new HttpError(503, 'Schedules are not available');
+    return o.schedules;
+  };
+  const Trigger = z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('cron'), cron: z.string().min(1).max(100) }),
+    z.object({ kind: z.literal('daily'), time: z.string().max(5) }),
+    z.object({ kind: z.literal('weekly'), weekday: z.number().int(), time: z.string().max(5) }),
+    z.object({ kind: z.literal('every_hours'), hours: z.number().int() }),
+    z.object({ kind: z.literal('mission_done'), watch: z.string().min(1).max(32) }),
+  ]);
+  const ScheduleBody = z.object({
+    name: z.string().min(1).max(200),
+    brief: z.string().min(1).max(20_000),
+    plannerAgentId: z.string().min(1).max(64),
+    reviewerAgentIds: z.array(z.string().min(1).max(64)).max(20).optional(),
+    maxRounds: z.number().int().optional(),
+    trigger: Trigger,
+  });
+  const asInput = (b: z.infer<typeof ScheduleBody>): ScheduleInput => ({ name: b.name, brief: b.brief, plannerAgentId: b.plannerAgentId, ...(b.reviewerAgentIds ? { reviewerAgentIds: b.reviewerAgentIds } : {}), ...(b.maxRounds ? { maxRounds: b.maxRounds } : {}), trigger: b.trigger });
+  const ScheduleId = z.string().regex(/^S\d{1,6}$/);
+
+  o.server.route('POST', '/api/schedules', 'human', async ({ principal, body }) => {
+    const b = await parse(ScheduleBody, body);
+    const s = await act(() => schedules().create(asInput(b)));
+    o.board.recordControl(human(principal), `created schedule ${s.id} "${s.name}" (${s.when})`);
+    return s;
+  });
+  o.server.route('POST', '/api/schedules/get', 'human', async ({ body }) => {
+    const b = await parse(z.object({ id: ScheduleId }), body);
+    return act(() => schedules().get(b.id));
+  });
+  o.server.route('POST', '/api/schedules/update', 'human', async ({ principal, body }) => {
+    const b = await parse(ScheduleBody.extend({ id: ScheduleId }), body);
+    const s = await act(() => schedules().update(b.id, asInput(b)));
+    o.board.recordControl(human(principal), `changed schedule ${s.id} "${s.name}" (${s.when})`);
+    return s;
+  });
+  o.server.route('POST', '/api/schedules/enable', 'human', async ({ principal, body }) => {
+    const b = await parse(z.object({ id: ScheduleId, enabled: z.boolean() }), body);
+    const s = await act(() => schedules().setEnabled(b.id, b.enabled));
+    o.board.recordControl(human(principal), `${b.enabled ? 'switched on' : 'switched off'} schedule ${s.id} "${s.name}"`);
+    return s;
+  });
+  o.server.route('POST', '/api/schedules/run', 'human', async ({ principal, body }) => {
+    const b = await parse(z.object({ id: ScheduleId }), body);
+    const run = await act(() => schedules().runNow(b.id));
+    o.board.recordControl(human(principal), `ran schedule ${b.id} now: ${run.outcome === 'started' ? `started ${run.missionId}` : run.outcome.replace(':', ' ')}`);
+    return run;
+  });
+  o.server.route('POST', '/api/schedules/delete', 'human', async ({ principal, body }) => {
+    const b = await parse(z.object({ id: ScheduleId }), body);
+    await act(() => schedules().remove(b.id));
+    o.board.recordControl(human(principal), `deleted schedule ${b.id}`);
+    return { ok: true };
   });
 
   o.server.route('POST', '/api/stop-run', 'human', async ({ principal, body }) => {

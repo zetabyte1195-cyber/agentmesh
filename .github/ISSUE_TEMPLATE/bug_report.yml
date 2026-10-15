@@ -1,0 +1,61 @@
+name: Something does not work
+description: AgentMesh did something wrong, or did not do what it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for telling us. **If this is a security problem, do not post it here:** use "Report a vulnerability" on the Security tab (see SECURITY.md).
+
+        Before you paste anything below, read it through and remove what is private: folder names that include your name, tokens, keys, the contents of your project.
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: What you did, and what you saw instead of what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: AgentMesh version
+      description: Run `agentmesh --version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Operating system
+      placeholder: "Windows 11, macOS 15, Ubuntu 24.04 under WSL, ..."
+    validations:
+      required: true
+  - type: input
+    id: tools
+    attributes:
+      label: Agent tools involved
+      description: Which tools, and their versions if you know them.
+      placeholder: "Claude Code 2.1, Antigravity 1.3"
+    validations:
+      required: false
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `agentmesh doctor`
+      description: Check it first for anything private.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to see it again
+      description: The smallest set of steps that shows the problem.
+    validations:
+      required: false

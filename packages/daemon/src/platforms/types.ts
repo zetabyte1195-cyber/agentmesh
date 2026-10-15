@@ -11,6 +11,10 @@ export interface PlatformRunContext {
   dir: string;
   /** Claude-format MCP config file ({mcpServers:{agentmesh:{type:'http',url,headers}}}). */
   claudeMcpConfig: string;
+  /** The same connection written in other tools' own config formats (opencode, Gemini CLI), for {mcpConfigFile:<tool>}. */
+  toolConfigs?: { opencode: string; gemini: string };
+  /** True when the tool will run inside a container: paths are the container's, and the tool is found there, not on this computer. */
+  inContainer?: boolean;
 }
 
 export interface LaunchSpec {
@@ -52,6 +56,8 @@ export interface PlatformAdapter {
   verified: boolean;
   /** One line for people choosing a platform. */
   summary: string;
+  /** True when the tool's output exposes tool calls and results, so a run that repeats itself can be stopped (see runner/loop.ts). */
+  loopProtection?: boolean;
   detect(): Promise<Detection>;
   /** Platform-specific setup checks beyond "is it installed". */
   diagnose?(): Promise<Diagnosis[]>;

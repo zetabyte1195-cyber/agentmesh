@@ -1,14 +1,12 @@
 // Review tools executed BY THE DAEMON (P2.7, from live AC-8 run #2): an auditor on any platform can
 // read the exact pinned diff and run the project's configured verification without shell access.
 // Headless agy refuses commands without exact allow rules (e.g. `git show`), which ended a live audit.
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { SqliteDatabase } from '../db/index.js';
 import { taskDiff } from '../git/diff.js';
 import type { Principal } from '../identity/index.js';
 import { changedPathsBetween } from '../leases/index.js';
+import { type CheckRunner, hostCheck } from './check.js';
 
-const execAsync = promisify(exec);
 export const MAX_DIFF_CHARS = 200_000;
 const OUTPUT_TAIL_CHARS = 6_000;
 const REVIEWABLE = new Set(['READY_FOR_REVIEW', 'AUDITING']);
@@ -37,6 +35,8 @@ export interface ReviewServiceOptions {
   db: SqliteDatabase;
   /** From .agentmesh/config.json, set by the Human. Never agent-supplied. A function so the Human can change it while running. */
   verifyCommand: string | null | (() => string | null);
+  /** Runs the check. Default: on this computer. Container mode can supply one that runs it in the container. */
+  runCheck?: CheckRunner;
   verifyTimeoutMs?: number;
 }
 
@@ -69,7 +69,7 @@ export class ReviewService {
     this.verifying.add(taskId);
     const started = Date.now();
     try {
-      const { stdout, stderr } = await execAsync(command, { cwd: t.worktree_path!, windowsHide: true, timeout: this.options.verifyTimeoutMs ?? 10 * 60_000, maxBuffer: 16 * 1024 * 1024 });
+      const { stdout, stderr } = await (this.options.runCheck ?? hostCheck)(command, { cwd: t.worktree_path!, timeoutMs: this.options.verifyTimeoutMs ?? 10 * 60_000, maxBuffer: 16 * 1024 * 1024 });
       return { taskId, command, ok: true, exitCode: 0, durationMs: Date.now() - started, output: tail(`${stdout}${stderr}`) };
     } catch (err) {
       const e = err as { code?: number | string; stdout?: string; stderr?: string; killed?: boolean; message: string };

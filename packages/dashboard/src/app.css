@@ -1,1 +1,92 @@
 @import "tailwindcss";
+
+/* Light/dark is chosen by theme.ts, which sets data-theme on <html> (Auto follows the system). */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/*
+ * The look: an engineering drawing. Dark is cyanotype blue, light is drafting paper; the single warm colour
+ * (marigold) is kept for the one action that matters on a screen, like a stamp on a drawing.
+ * No web fonts: AgentMesh contacts nobody, and the cockpit's security policy only allows its own files. The
+ * display face is the DIN-style engineering lettering the operating system already has (Bahnschrift on Windows,
+ * DIN Alternate on macOS); everything else reads in the system UI font.
+ */
+@theme {
+  --font-sans: system-ui, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: Bahnschrift, "DIN Alternate", "Segoe UI Variable Display", "Avenir Next", system-ui, sans-serif;
+
+  /* the neutral ramp, re-cut in blue-slate: 50-300 are paper and ruled lines, 700-950 are cyanotype */
+  --color-stone-50: #f3f6f9;
+  --color-stone-100: #e8eef4;
+  --color-stone-200: #d3dde7;
+  --color-stone-300: #b7c6d4;
+  --color-stone-400: #8da2b5;
+  --color-stone-500: #5f768a;
+  --color-stone-600: #475f74;
+  --color-stone-700: #31506b;
+  --color-stone-800: #1f3a52;
+  --color-stone-900: #132638;
+  --color-stone-950: #0d1b2a;
+
+  --color-marigold-300: #f8cf72;
+  --color-marigold-400: #f4b942;
+  --color-marigold-500: #dd9f22;
+}
+
+html {
+  color-scheme: light;
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* headings and labels use the engineering lettering; reading text does not */
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  letter-spacing: 0.005em;
+}
+
+/* a keyboard user can always see where they are */
+:focus-visible {
+  outline: 2px solid #1b5fa8;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+html[data-theme="dark"] :focus-visible {
+  outline-color: var(--color-marigold-400);
+}
+
+/*
+ * Dark-mode contrast for the screens written before this theme, which set a muted or status colour for light
+ * paper only. One rule here beats editing every component.
+ */
+html[data-theme="dark"] .text-stone-500 { color: var(--color-stone-400); }
+html[data-theme="dark"] .text-stone-600 { color: var(--color-stone-300); }
+html[data-theme="dark"] .text-stone-700 { color: var(--color-stone-200); }
+html[data-theme="dark"] .text-stone-800 { color: var(--color-stone-100); }
+html[data-theme="dark"] .text-green-700 { color: #5fd3a5; }
+html[data-theme="dark"] .text-red-600,
+html[data-theme="dark"] .text-red-700 { color: #ff8f8f; }
+html[data-theme="dark"] .text-amber-700 { color: var(--color-marigold-400); }
+html[data-theme="dark"] .text-orange-700 { color: #ffa77a; }
+html[data-theme="dark"] .text-violet-700 { color: #c4a8ff; }
+html[data-theme="dark"] .text-teal-700 { color: #6fd9cf; }
+html[data-theme="dark"] .text-sky-700 { color: #7cc0ff; }
+html[data-theme="dark"] .bg-amber-50 { background-color: #2a2412; }
+html[data-theme="dark"] .bg-red-50 { background-color: #2c1618; }
+html[data-theme="dark"] .bg-green-50 { background-color: #12281f; }
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

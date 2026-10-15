@@ -64,6 +64,14 @@ export interface ProjectConfig {
   agents: InitAgent[];
   /** Platforms beyond Claude Code and Antigravity, defined in config (see platforms/custom.ts). */
   customPlatforms?: CustomPlatformConfig[];
+  /** Free text from the Human about the project (stack, conventions, things to avoid). Added to every agent prompt. */
+  projectContext?: string;
+  /** Where to tell the Human that something needs them (a plan to approve, a question, an agent that gave up). */
+  notifications?: { webhookUrl?: string; webhookSecret?: string };
+  /** Container mode (EXPERIMENTAL; edited by hand, never from the cockpit): run agents inside containers. See sandbox/config.ts. */
+  sandbox?: unknown;
+  /** Once a day, ask GitHub whether a newer AgentMesh release exists (contacts github.com; off by default). */
+  updateCheck?: boolean;
   /** Project audit checklist (spec v1.1 §9.4); the core gates are always enforced. */
   checklist: { required: string[] };
 }

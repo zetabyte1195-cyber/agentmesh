@@ -75,6 +75,25 @@ export function platformInstaller(platformId: string, os: NodeJS.Platform = proc
           lands: join(homedir(), '.local', 'bin'),
         };
   }
+  // Other tools added from a recipe: npm packages whose names were checked on the registry (October 2026), and for
+  // opencode also against its own documentation.
+  if (platformId === 'CODEX' || platformId === 'GEMINI_CLI' || platformId === 'OPENCODE') {
+    const [pkg, what, binary, after] =
+      platformId === 'CODEX'
+        ? (['@openai/codex', 'Codex CLI', 'codex', 'Sign in once: run `codex` in a terminal.'] as const)
+        : platformId === 'GEMINI_CLI'
+          ? (['@google/gemini-cli', 'Gemini CLI', 'gemini', 'Sign in once: run `gemini`, or set GEMINI_API_KEY.'] as const)
+          : (['opencode-ai', 'opencode', 'opencode', 'Configure a provider and model in opencode once (see its documentation).'] as const);
+    return {
+      what,
+      binary,
+      display: `npm install -g ${pkg}`,
+      executable: os === 'win32' ? 'npm.cmd' : 'npm',
+      args: ['install', '-g', pkg],
+      shell: os === 'win32',
+      after,
+    };
+  }
   return null;
 }
 
