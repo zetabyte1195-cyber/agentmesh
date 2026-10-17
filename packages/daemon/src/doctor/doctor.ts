@@ -8,6 +8,7 @@ import { git } from '../git/run-git.js';
 import { detectProject } from '../init/detect.js';
 import { InitError, type ProjectConfig, requireGitIdentity } from '../init/init.js';
 import { dashboardDist } from '../paths.js';
+import { isBlockedPort } from '../server/ports.js';
 import { AGY_MCP_RULE, type CheckLevel, type Diagnosis, type PlatformAdapter, type PlatformRegistry, createRegistry, ensureAgyMcpRule } from '../platforms/index.js';
 import { type InstallStep, gitInstallHint, gitInstaller, landedOffPath, platformInstaller, runInstall } from './install.js';
 import { type SandboxConfig, SandboxConfigError, parseSandbox, probeSandbox, sandboxApplies } from '../sandbox/index.js';
@@ -136,8 +137,9 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
 
   // Port
   const port = options.port ?? config?.daemon.port ?? 8934;
-  const ps = await portState(port);
-  if (ps === 'free') add(check('ok', `Port ${port} is free`, 'The cockpit will use it.'));
+  const ps = isBlockedPort(port) ? 'refused' : await portState(port);
+  if (ps === 'refused') add(check('fail', `Port ${port} cannot be used`, 'Browsers and Node refuse to connect to it because it belongs to a well-known service.', 'agentmesh start --port 8934'));
+  else if (ps === 'free') add(check('ok', `Port ${port} is free`, 'The cockpit will use it.'));
   else if (ps === 'agentmesh') add(check('info', `An AgentMesh cockpit is already running on port ${port}`, 'Open it in your browser, or stop it before starting another.'));
   else if (ps === 'busy') add(check('fail', `Port ${port} is used by another program`, 'The cockpit cannot start there.', `agentmesh start --port ${port + 1}`));
   else add(check('fail', `Port ${port} cannot be used`, process.platform === 'win32' ? 'Windows reserves some port ranges (Hyper-V/WSL); this may be one of them.' : 'The system refused to open it.', process.platform === 'win32' ? 'netsh interface ipv4 show excludedportrange protocol=tcp   then pick a port outside those ranges: agentmesh start --port 8934' : `agentmesh start --port ${port + 1}`));

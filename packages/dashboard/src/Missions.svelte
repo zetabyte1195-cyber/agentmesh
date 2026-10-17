@@ -4,6 +4,9 @@
   import Markdown from './Markdown.svelte';
   import { onMount } from 'svelte';
   import { formatUsage, get, post, type UsageTotals } from './api';
+  import BudgetControl from './BudgetControl.svelte';
+  import { parseLimits } from './budget';
+  import type { MissionBudget } from './types';
 
   type Agent = { id: string; name: string; platform: string };
   type Review = { round: number; planVersion: number; reviewer: string; verdict: 'OK' | 'GAPS'; gaps: string };
@@ -22,6 +25,7 @@
     waitingOn: string[];
     tasks: MissionTask[];
     progress: { total: number; committed: number };
+    budget: MissionBudget | null;
   };
 
   let { missions, agents, usage = [], onChanged }: { missions: Mission[]; agents: Agent[]; usage?: ({ missionId: string } & UsageTotals)[]; onChanged: () => void } = $props();
@@ -50,6 +54,9 @@
   let skipped = $state<Record<string, boolean>>({});
   let startBusy = $state(false);
   let startError = $state('');
+  // Optional spending limit for the new mission (blank: none).
+  let limitUsd = $state('');
+  let limitTokens = $state('');
 
   $effect(() => {
     if (!planner && workers.length) planner = workers[0]!.id;
@@ -58,12 +65,26 @@
   const chosenReviewers = $derived(reviewerChoices.filter((a) => !skipped[a.id]).map((a) => a.id));
 
   async function start(): Promise<void> {
-    startBusy = true;
     startError = '';
+    const limits = parseLimits(limitUsd, limitTokens);
+    if (!limits.ok) {
+      startError = limits.error;
+      return;
+    }
+    startBusy = true;
     try {
-      await post('/api/missions', { title: title.trim(), brief: brief.trim(), plannerAgentId: planner, reviewerAgentIds: chosenReviewers });
+      await post('/api/missions', {
+        title: title.trim(),
+        brief: brief.trim(),
+        plannerAgentId: planner,
+        reviewerAgentIds: chosenReviewers,
+        ...(limits.budgetUsd !== null ? { budgetUsd: limits.budgetUsd } : {}),
+        ...(limits.budgetTokens !== null ? { budgetTokens: limits.budgetTokens } : {}),
+      });
       title = '';
       brief = '';
+      limitUsd = '';
+      limitTokens = '';
       onChanged();
     } catch (e) {
       startError = (e as Error).message;
@@ -179,6 +200,18 @@
         {/each}
       </fieldset>
     </div>
+    <details class="mt-3">
+      <summary class="cursor-pointer text-xs font-medium">Spending limit (optional)</summary>
+      <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label class="text-xs font-medium" for="m-limit-usd">Stop around this many dollars
+          <input id="m-limit-usd" class={field} inputmode="decimal" placeholder="no dollar limit, for example 5" bind:value={limitUsd} />
+        </label>
+        <label class="text-xs font-medium" for="m-limit-tokens">or around this many tokens
+          <input id="m-limit-tokens" class={field} inputmode="numeric" placeholder="no token limit, for example 2m" bind:value={limitTokens} />
+        </label>
+      </div>
+      <p class="mt-1 text-xs text-stone-500">Once the mission has used about this much, no more runs start for it and you are asked whether to raise the limit. It counts only what the agent tools report, and a run already going finishes, so it can go a little over. You can change it later.</p>
+    </details>
     <div class="mt-3 flex items-center gap-3">
       <button class={primary} disabled={startBusy || !title.trim() || brief.trim().length < 10 || !planner} onclick={start}>{startBusy ? 'Starting…' : 'Start'}</button>
       <button class={button} disabled={!title.trim() || brief.trim().length < 10} title="Keep this name and brief to start from again later" onclick={saveTemplate}>Save as a template</button>
@@ -190,9 +223,10 @@
 
 {#each missions as m (m.id)}
   {@const step = STEP_OF[m.status] ?? -1}
-  <article class="mb-4 rounded-xl border border-stone-200 bg-white p-4 dark:border-stone-800 dark:bg-stone-900" aria-label={`Mission ${m.id}: ${m.title}`}>
+  <article id={`mission-${m.id}`} tabindex="-1" class="mb-4 scroll-mt-4 rounded-xl border border-stone-200 bg-white p-4 outline-none focus-visible:ring-2 focus-visible:ring-marigold-400 dark:border-stone-800 dark:bg-stone-900" aria-label={`Mission ${m.id}: ${m.title}`}>
     <header class="flex flex-wrap items-baseline justify-between gap-2">
       <h2 class="text-base font-semibold"><span class="mr-2 font-mono text-xs text-stone-500">{m.id}</span>{m.title}</h2>
+      {#if m.budget?.reached}<span class={[badge, 'border-amber-500 bg-amber-50 text-amber-800 dark:bg-amber-950 dark:text-amber-300']} title={m.budget.reached}>Stopped: limit reached</span>{/if}
       <span class={[badge, m.status === 'PLAN_READY' ? 'border-amber-500 bg-amber-50 text-amber-800 dark:bg-amber-950 dark:text-amber-300' : m.status === 'DONE' ? 'border-green-600 text-green-700' : m.status === 'CANCELLED' ? 'border-stone-400 text-stone-500' : 'border-stone-400']}>{LABEL[m.status] ?? m.status}</span>
     </header>
 
@@ -260,6 +294,7 @@
 
     {#if usage.find((u) => u.missionId === m.id)}<p class="mt-3 text-xs text-stone-500" title="What the agent tools reported for this mission's runs. Antigravity reports tokens but no cost.">Used so far: {formatUsage(usage.find((u) => u.missionId === m.id)!)}</p>{/if}
     {#if !['DONE', 'CANCELLED'].includes(m.status)}
+      <BudgetControl missionId={m.id} budget={m.budget} {onChanged} />
       <div class="mt-3 flex items-center gap-3">
         <button class="text-xs text-red-700 underline dark:text-red-400" disabled={busy[`${m.id}-cancel`]} onclick={() => act(`${m.id}-cancel`, '/api/missions/cancel', { missionId: m.id })}>Cancel this mission</button>
       </div>

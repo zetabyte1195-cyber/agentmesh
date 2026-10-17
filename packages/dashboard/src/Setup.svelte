@@ -6,6 +6,7 @@
   import Notifications from './Notifications.svelte';
   import Playbooks from './Playbooks.svelte';
   import ProjectContext from './ProjectContext.svelte';
+  import RecipeCard from './RecipeCard.svelte';
   import type { NotificationsState, PlaybooksState, RecipeInfo, SandboxState, UpdateState } from './types';
   import Updates from './Updates.svelte';
 
@@ -68,10 +69,10 @@
       await post('/api/platforms/fix', { platform: p.id });
       await scan();
     });
-  const addRecipe = (r: RecipeInfo) =>
+  const addRecipe = (r: RecipeInfo, values: Record<string, string>) =>
     run(`recipe-${r.id}`, async () => {
-      await post('/api/platforms/recipe', { id: r.id });
-      messages[`recipe-${r.id}`] = `${r.title} added. Install it and sign in if you have not, then Connect it above and press Test.`;
+      await post('/api/platforms/recipe', { id: r.id, values });
+      messages[`recipe-${r.id}`] = r.added ? `${r.title} changed. Press Test on it above to check the new choices.` : `${r.title} added. Install it and sign in if you have not, then Connect it above and press Test.`;
       await scan();
       onChanged();
     });
@@ -147,21 +148,20 @@
     <p class="text-xs text-stone-500">Ready-made definitions written from each vendor's documentation. <strong>None has been run by AgentMesh's authors</strong>: every one is added as "not verified" until your own Test passes. Read the notes first.</p>
     <div class="mt-2 grid gap-3 lg:grid-cols-3">
       {#each recipes.filter((r) => !r.added) as r (r.id)}
-        <article class="rounded-xl border border-stone-200 bg-white p-4 text-sm dark:border-stone-800 dark:bg-stone-900" aria-label={r.title}>
-          <h4 class="font-semibold">{r.title}</h4>
-          <p class="mt-1 text-stone-600 dark:text-stone-300">{r.summary}</p>
-          <details class="mt-2">
-            <summary class="cursor-pointer text-xs font-medium">Read before adding ({r.caveats.length} note{r.caveats.length === 1 ? '' : 's'})</summary>
-            <ul class="mt-1 list-disc space-y-1 pl-5 text-xs text-stone-600 dark:text-stone-300">{#each r.caveats as c (c)}<li>{c}</li>{/each}</ul>
-            <p class="mt-2 text-xs"><strong>Get it:</strong> <code class="font-mono">{r.install}</code></p>
-            <p class="mt-1 text-xs"><strong>Then:</strong> {r.signIn}</p>
-            <p class="mt-1 text-xs">Documentation: {#each r.docs as d, i (d)}<a class="underline" href={d} target="_blank" rel="noreferrer">link {i + 1}</a>{i < r.docs.length - 1 ? ', ' : ''}{/each}</p>
-          </details>
-          <button class={['mt-3', button]} disabled={busy[`recipe-${r.id}`]} onclick={() => addRecipe(r)}>Add as "not verified"</button>
-          {#if errors[`recipe-${r.id}`]}<p role="alert" class="mt-2 text-xs text-red-600">{errors[`recipe-${r.id}`]}</p>{/if}
-        </article>
+        <RecipeCard recipe={r} busy={Boolean(busy[`recipe-${r.id}`])} error={errors[`recipe-${r.id}`] ?? ''} onAdd={(values) => addRecipe(r, values)} />
       {/each}
     </div>
+  {/if}
+  {#if recipes.some((r) => r.added && r.fields.length)}
+    <section aria-label="Change a tool you added" class="mt-5">
+      <h3 class="text-sm font-semibold">Change a tool you added</h3>
+      <p class="text-xs text-stone-500">A wrong model name, or another model to try: change it here. Agents already connected use the new choice from their next run.</p>
+      <div class="mt-2 grid gap-3 lg:grid-cols-3">
+        {#each recipes.filter((r) => r.added && r.fields.length) as r (r.id)}
+          <RecipeCard recipe={r} mode="change" busy={Boolean(busy[`recipe-${r.id}`])} error={errors[`recipe-${r.id}`] ?? ''} message={messages[`recipe-${r.id}`] ?? ''} onAdd={(values) => addRecipe(r, values)} />
+        {/each}
+      </div>
+    </section>
   {/if}
   <p class="mt-3 text-xs text-stone-500">A tool that is not listed? Describe it under "customPlatforms" in .agentmesh/config.json (see the README); it appears above as unverified until you test it.</p>
 </section>

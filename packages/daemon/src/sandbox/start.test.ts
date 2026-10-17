@@ -94,6 +94,15 @@ describe('container mode in the daemon', () => {
   });
 });
 
+describe('agentmesh doctor and the port', () => {
+  it('says a port that browsers and Node refuse cannot be used, and what to do', async () => {
+    const { runDoctor } = await import('../doctor/doctor.js');
+    const report = await runDoctor({ repoRoot: repo, port: 6000 });
+    expect(report.checks.find((c) => c.title === 'Port 6000 cannot be used')).toMatchObject({ level: 'fail', fix: 'agentmesh start --port 8934' });
+    expect(report.ok).toBe(false);
+  });
+});
+
 describe('agentmesh doctor with container mode', () => {
   it('reports an invalid section as a failure that says AgentMesh will not start', async () => {
     const { runDoctor } = await import('../doctor/doctor.js');

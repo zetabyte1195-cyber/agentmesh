@@ -151,9 +151,10 @@ export class MissionService {
   }
 
   /** What the dispatcher should start for this agent, if anything. Pure read. */
-  workFor(agentId: string): { kind: 'PLAN' | 'PLAN_REVIEW' | 'PLAN_REVISE' | 'SPLIT'; missionId: string } | null {
+  workFor(agentId: string, skip?: (missionId: string) => boolean): { kind: 'PLAN' | 'PLAN_REVIEW' | 'PLAN_REVISE' | 'SPLIT'; missionId: string } | null {
     const rows = this.db.prepare("SELECT * FROM missions WHERE status IN ('PLANNING','REVIEWING','REVISING','SPLITTING') ORDER BY created_at, rowid").all() as MissionRow[];
     for (const m of rows) {
+      if (skip?.(m.id)) continue; // the caller passes over missions that are stopped or cooling down, so the next one is found
       if (!this.waitingOn(m).includes(agentId)) continue;
       const kind = m.status === 'PLANNING' ? 'PLAN' : m.status === 'REVIEWING' ? 'PLAN_REVIEW' : m.status === 'REVISING' ? 'PLAN_REVISE' : 'SPLIT';
       return { kind, missionId: m.id };

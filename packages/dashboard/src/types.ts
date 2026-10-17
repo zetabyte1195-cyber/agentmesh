@@ -18,7 +18,10 @@ export type Run = {
   outcome: 'moved' | 'no-change' | null;
 };
 
-export type Notice = { key: string; kind: 'plan' | 'question' | 'stuck' | 'done'; urgent: boolean; title: string; text: string; missionId?: string; taskId?: string };
+/** A mission's spending limit and what it has used (null on the mission when it has no limit). */
+export type MissionBudget = { maxCostUsd: number | null; maxTokens: number | null; usedCostUsd: number | null; usedTokens: number; reached: string | null };
+
+export type Notice = { key: string; kind: 'plan' | 'question' | 'stuck' | 'done' | 'budget'; urgent: boolean; title: string; text: string; missionId?: string; taskId?: string; questionId?: string; agentId?: string; subject?: string };
 
 export type NotificationsState = { webhookUrl: string | null; hasSecret: boolean; last: { at: string; ok: boolean; event: string; error?: string } | null };
 
@@ -56,6 +59,7 @@ export type ScheduleItem = {
 };
 export type SchedulesState = { timezone: string; max: number; items: ScheduleItem[]; runs: ScheduleRunItem[] };
 
-export type RecipeInfo = { id: string; title: string; summary: string; caveats: string[]; install: string; signIn: string; docs: string[]; added: boolean };
+export type RecipeField = { id: string; label: string; hint: string; default: string; suggest: 'ollama-models' | null };
+export type RecipeInfo = { id: string; title: string; summary: string; caveats: string[]; install: string; signIn: string; docs: string[]; fields: RecipeField[]; added: boolean; /** The choices as they are set, for a recipe that was added (null otherwise). */ current: Record<string, string> | null };
 
 export type SandboxState = { enabled: boolean; experimental: boolean; image: string; checks: 'host' | 'container'; agents: string[] | null; listener: { host: string; port: number } | null; blockedReason: string | null; warnings: string[] };

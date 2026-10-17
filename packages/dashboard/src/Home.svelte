@@ -1,41 +1,49 @@
 <script lang="ts">
   // Home: the answer to "what is happening and does it need me?". The headline says it in one sentence, the tray
   // under it holds the things only you can do, and the rest is a read-only picture of the agents, the work and
-  // what it has cost. Nothing here can only be done here: every tile and row leads to the screen that owns it.
+  // what it has cost. A question can be answered and a failed run retried right here; everything else leads to the
+  // screen that owns it.
   import type { UsageTotals } from './api';
   import AgentCard, { type AgentInfo } from './AgentCard.svelte';
-  import { compactNumber, distance, headline, nextSchedule, noticeAction, spendTotals, subline, taskSegments } from './home';
-  import Icon, { type IconName } from './Icon.svelte';
+  import { compactNumber, distance, firstSteps, headline, nextSchedule, spendTotals, subline, taskSegments } from './home';
+  import NoticeCard from './NoticeCard.svelte';
   import type { Notice, Run, SchedulesState } from './types';
   import type { View } from './views';
 
-  type HomeMission = { id: string; title: string; status: string; waitingOn: string[]; progress: { total: number; committed: number } };
+  type HomeMission = { id: string; title: string; status: string; waitingOn: string[]; progress: { total: number; committed: number }; budget?: { reached: string | null } | null };
   let {
     connected,
     agents,
     tasks,
     missions,
     notices,
+    questions,
     schedules,
     usage,
     runs,
     backoffs,
     paused,
+    landing,
     onNavigate,
     onStop,
+    onChanged,
   }: {
     connected: boolean;
     agents: AgentInfo[];
     tasks: { status: string }[];
     missions: HomeMission[];
     notices: Notice[];
+    questions: { id: string; text: string }[];
     schedules: SchedulesState | null;
     usage: ({ agentId: string } & UsageTotals)[];
     runs: Run[];
     backoffs: { platform: string; until: string; reason: string }[];
     paused: boolean;
-    onNavigate: (v: View) => void;
+    /** Whether the project's check is set up (so finished work can be merged). */
+    landing: boolean;
+    onNavigate: (v: View, focus?: string) => void;
     onStop: (agentId: string) => void;
+    onChanged: () => void;
   } = $props();
 
   // A clock that moves every half minute, so "in 3 hours" does not go stale on a screen left open.
@@ -52,11 +60,11 @@
   const next = $derived(nextSchedule(schedules?.items ?? []));
   const activeMissions = $derived(missions.filter((m) => !['DONE', 'CANCELLED'].includes(m.status)));
   const recent = $derived(runs.slice(0, 5));
+  const steps = $derived(firstSteps({ workers: workers.length, landing, missions: missions.length }));
 
   const MISSION_LABEL: Record<string, string> = { PLANNING: 'Writing the plan', REVIEWING: 'Being reviewed', REVISING: 'Merging the feedback', PLAN_READY: 'Waiting for you', SPLITTING: 'Splitting into tasks', IMPLEMENTING: 'Being built' };
   const RUN_LABEL: Record<string, string> = { RUNNING: 'Running', SUCCEEDED: 'Finished', FAILED: 'Failed', QUOTA: 'Out of quota', STOPPED: 'Stopped', ABANDONED: 'Interrupted' };
   const RUN_KIND: Record<string, string> = { TASK: 'Build', AUDIT: 'Review', HANDOFF: 'Message', PLAN: 'Plan', PLAN_REVIEW: 'Plan review', PLAN_REVISE: 'Plan revision', SPLIT: 'Split into tasks' };
-  const NOTICE_ICON: Record<Notice['kind'], IconName> = { plan: 'plan', question: 'question', stuck: 'alert', done: 'check' };
   const usedBy = (id: string) => usage.find((u) => u.agentId === id);
   const at = (iso: string) => Date.parse(iso.includes('T') ? iso : `${iso.replace(' ', 'T')}Z`);
   const clock = (iso: string) => new Date(at(iso)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -87,18 +95,23 @@
   {#if notices.length}
     <section aria-label="Needs you" class="grid grid-cols-1 gap-2">
       {#each notices as n (n.key)}
-        {@const act = noticeAction(n)}
-        <article class={[panel, 'flex items-center gap-3 border-l-[3px] p-3', n.urgent ? 'border-l-marigold-400 dark:border-l-marigold-400' : 'border-l-stone-300 dark:border-l-stone-700']}>
-          <Icon name={NOTICE_ICON[n.kind]} class={n.urgent ? 'text-marigold-500' : 'text-stone-500'} />
-          <div class="min-w-0 flex-1">
-            <h2 class="truncate text-sm font-semibold">{n.title}</h2>
-            <p class="line-clamp-2 text-sm text-stone-600 dark:text-stone-300">{n.text}</p>
-          </div>
-          <button
-            class={['shrink-0 rounded-md px-3 py-1.5 text-sm font-semibold', act.primary ? 'bg-marigold-400 text-stone-950 hover:bg-marigold-300' : 'border border-stone-300 hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800']}
-            onclick={() => onNavigate(act.view)}>{act.label}</button>
-        </article>
+        <NoticeCard notice={n} question={n.questionId ? (questions.find((q) => q.id === n.questionId)?.text ?? null) : null} {onNavigate} {onChanged} />
       {/each}
+    </section>
+  {/if}
+
+  {#if steps}
+    <section aria-label="Getting started" class={[panel, 'p-4']}>
+      <h2 class="font-display text-lg font-semibold">Getting started</h2>
+      <ol class="mt-2 grid grid-cols-1 gap-2">
+        {#each steps as step, i (step.id)}
+          <li class="flex items-center gap-3 text-sm">
+            <span class={['grid size-6 shrink-0 place-items-center rounded-full border text-xs font-semibold', step.done ? 'border-green-600 bg-green-600 text-white dark:border-green-400 dark:bg-green-400 dark:text-stone-950' : 'border-stone-400 dark:border-stone-500']} aria-hidden="true">{step.done ? '✓' : i + 1}</span>
+            <span class={step.done ? 'text-stone-500 line-through dark:text-stone-400' : 'font-semibold'}>{step.text}{step.done ? ' (done)' : ''}</span>
+            {#if !step.done}<button class="ml-auto shrink-0 rounded-md border border-stone-300 px-2.5 py-1 text-sm hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800" onclick={() => onNavigate(step.view)}>{step.action}</button>{/if}
+          </li>
+        {/each}
+      </ol>
     </section>
   {/if}
 
@@ -118,7 +131,7 @@
       <div class={tileLabel}>Used so far</div>
       <div class="mt-1 font-display text-2xl font-semibold">{spend.costUsd !== null ? `$${spend.costUsd.toFixed(2)}` : spend.tokens ? `${compactNumber(spend.tokens)} tokens` : 'Nothing yet'}</div>
       <div class="mt-3 text-xs text-stone-500">
-        {spend.runs} run{spend.runs === 1 ? '' : 's'}{spend.costUsd !== null && spend.tokens ? `, ${compactNumber(spend.tokens)} tokens` : ''}{spend.unreportedRuns ? `, ${spend.unreportedRuns} reported nothing` : ''}
+        {spend.runs} run{spend.runs === 1 ? '' : 's'}{spend.costUsd !== null && spend.tokens ? `, ${compactNumber(spend.tokens)} tokens` : ''}{spend.cachedTokens ? `, ${compactNumber(spend.cachedTokens)} read from cache` : ''}{spend.unreportedRuns ? `, ${spend.unreportedRuns} reported nothing` : ''}
       </div>
     </button>
 
@@ -139,7 +152,7 @@
     {#if workers.length}
       <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {#each workers as agent (agent.id)}
-          <AgentCard {agent} used={usedBy(agent.id)} {paused} {onStop} />
+          <AgentCard {agent} used={usedBy(agent.id)} {paused} unavailable={backoffs.find((b) => b.platform === agent.platform)} {onStop} />
         {/each}
       </div>
     {:else}
@@ -159,10 +172,10 @@
         <ul class="grid grid-cols-1 gap-2">
           {#each activeMissions as m (m.id)}
             <li>
-              <button class={[panel, 'block w-full p-3 text-left hover:border-stone-400 dark:hover:border-stone-600']} onclick={() => onNavigate('missions')}>
+              <button class={[panel, 'block w-full p-3 text-left hover:border-stone-400 dark:hover:border-stone-600']} onclick={() => onNavigate('missions', `mission-${m.id}`)}>
                 <div class="flex items-baseline justify-between gap-3">
                   <span class="truncate font-semibold">{m.title}</span>
-                  <span class="shrink-0 text-xs text-stone-500">{MISSION_LABEL[m.status] ?? m.status}</span>
+                  <span class={['shrink-0 text-xs', m.budget?.reached ? 'font-semibold text-amber-700 dark:text-amber-400' : 'text-stone-500']}>{m.budget?.reached ? 'Stopped: limit reached' : (MISSION_LABEL[m.status] ?? m.status)}</span>
                 </div>
                 {#if m.progress.total}
                   <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-stone-200 dark:bg-stone-800"><span class="block h-full bg-green-600 dark:bg-green-400" style:width={percent(m.progress.committed, m.progress.total)}></span></div>

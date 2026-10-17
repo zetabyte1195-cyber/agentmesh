@@ -46,6 +46,11 @@ Check it worked:
 agentmesh --version
 ```
 
+- **Want to check the download first?** Each release has a checksum file next to the package. Download both from the [latest release](https://github.com/zetabyte1195-cyber/agentmesh/releases/latest), compare, then install from the file:
+  - Windows (PowerShell): `(Get-FileHash .\agentmesh.tgz -Algorithm SHA256).Hash` should equal the text at the start of `agentmesh.tgz.sha256` (capital or small letters make no difference).
+  - macOS or Linux: `shasum -a 256 -c agentmesh.tgz.sha256` (or `sha256sum -c agentmesh.tgz.sha256`) says `OK`.
+  - Then `npm install -g ./agentmesh.tgz`.
+  This catches a damaged download. It cannot tell you the release itself is trustworthy: the package and its checksum come from the same place.
 - **Windows, "running scripts is disabled on this system":** PowerShell blocks the small launcher npm made. Either run `agentmesh.cmd` instead of `agentmesh` everywhere below, or allow it once for your user:
   `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
 - **macOS, `EACCES` / "permission denied":** npm is not allowed to install programs for all users. See npm's guide: <https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally> (the simplest fix is installing Node with a version manager such as nvm).
@@ -169,7 +174,7 @@ AgentMesh never looks for updates by itself unless you switch on **Check once a 
 | An agent shows **not verified** or fails `--test` | Run the tool by hand once (`claude` or `agy`) and sign in; then `agentmesh doctor --fix --test`. |
 | Antigravity "refused" / does nothing | `agentmesh doctor --fix` |
 | "Nothing will be added to your main branch" | Set how to check your project in **Setup**. |
-| The port is in use or reserved (Windows reserves some) | `agentmesh start --port 8944` |
+| The port is in use or reserved (Windows reserves some), or AgentMesh says a port "cannot be used: browsers and Node refuse to connect to it" (6000 and 10080 are two of about 80) | `agentmesh start --port 8944` |
 | "AgentMesh's database engine does not work" | `agentmesh repair` |
 | An agent **gave up** on something | Read the reason on **Home** (or under **Needs you** on the **Board**), fix it (answer, message the agent, or change the task), then **Try again**. |
 | An agent's quota ran out | It pauses by itself until the quota resets; the others carry on. |

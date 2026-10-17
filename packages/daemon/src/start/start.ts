@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { AuditGate } from '../audit/index.js';
 import { BoardService } from '../board/index.js';
+import { BUDGET_MIGRATION, BudgetService } from '../budget/index.js';
 import { cockpitEventPusher, registerCockpit, registerControls, registerSetup, setupState } from '../cockpit/index.js';
 import { MIGRATIONS, type SqliteDatabase, closeDatabase, migrate, openDatabase } from '../db/index.js';
 import { DISPATCH_MIGRATION, type DispatchableAgent, Dispatcher, USAGE_MIGRATION } from '../dispatch/index.js';
@@ -26,7 +27,7 @@ import { SCHEDULE_MIGRATION, ScheduleService } from '../schedules/index.js';
 import { UpdateChecker } from '../update/index.js';
 import { ReviewService } from '../review/index.js';
 import { CommitService } from '../work/index.js';
-import { DEFAULT_CLAUDE_ALLOWED_TOOLS, createRegistry } from '../platforms/index.js';
+import { DEFAULT_CLAUDE_ALLOWED_TOOLS, type PlatformRegistry, createRegistry, launcher } from '../platforms/index.js';
 import { DaemonServer } from '../server/index.js';
 
 export const HUMAN_AGENT_ID = 'human';
@@ -71,6 +72,8 @@ export interface RunningDaemon {
   updates: UpdateChecker;
   schedules: ScheduleService;
   mergeQueue: MergeQueue | null;
+  /** The platforms known to this daemon (the built-in ones and those added). */
+  registry: PlatformRegistry;
   /** Resolves when the Human asked the daemon to stop (agentmesh stop). */
   stopRequested: Promise<void>;
   stop: () => Promise<void>;
@@ -92,12 +95,15 @@ export async function startDaemon(options: StartOptions): Promise<RunningDaemon>
   // Container mode: an invalid section stops AgentMesh from starting. It must never fall back to running agents outside a container.
   const sandboxConfig = parseSandbox(config.sandbox);
 
-  // 1. State: migrations 1 (schema), 2 (credentials), 3 (dispatch), 4 (missions).
+  // 1. State: migrations 1 (schema), 2 (credentials), 3 (dispatch), 4 (missions), 5 (usage), 6 (schedules), 7 (spending limits).
   const db = openDatabase(join(root, '.agentmesh', 'mesh.db'));
-  migrate(db, [...MIGRATIONS, IDENTITY_MIGRATION, DISPATCH_MIGRATION, MISSION_MIGRATION, USAGE_MIGRATION, SCHEDULE_MIGRATION]);
+  migrate(db, [...MIGRATIONS, IDENTITY_MIGRATION, DISPATCH_MIGRATION, MISSION_MIGRATION, USAGE_MIGRATION, SCHEDULE_MIGRATION, BUDGET_MIGRATION]);
   const identity = new IdentityService(db);
   const exists = (id: string) => Boolean(db.prepare('SELECT 1 FROM agents WHERE id = ?').get(id));
   if (!exists(HUMAN_AGENT_ID)) identity.registerAgent({ id: HUMAN_AGENT_ID, name: 'Human', platform: 'HUMAN', paradigm: 'HUMAN' });
+  // A cockpit session ends when AgentMesh stops: a cookie copied from a browser is no use after a restart (the login link printed at
+  // start makes a new one). The agents' own tokens are handled by the dispatcher.
+  db.prepare("UPDATE agent_credentials SET revoked_at = CURRENT_TIMESTAMP WHERE label = 'cockpit-session' AND revoked_at IS NULL").run();
   for (const a of config.agents) {
     if (!exists(a.id)) identity.registerAgent({ id: a.id, name: registry.get(a.platform)?.friendlyName ?? a.id, platform: a.platform, paradigm: 'CLI' });
   }
@@ -150,19 +156,20 @@ export async function startDaemon(options: StartOptions): Promise<RunningDaemon>
         platform: a.platform,
         rulebook: a.rulebook || adapter.rulebook,
         ownerNames: [adapter.friendlyName],
-        command: (prompt: string, cwd: string, run) => adapter.command({ prompt, cwd, run, allowedTools: allowed }),
+        command: launcher(registry, a.platform, allowed),
       };
     });
   // The daemon claims TASK work itself and starts the agent inside the new worktree (live AC-8 run #1).
   const claim = async (principal: Parameters<BoardService['claimTask']>[0], taskId: string) => ({ worktree: (await board.claimTask(principal, taskId)).worktree });
   const scratch = { create: (name: string) => worktrees.createScratch(name), remove: (path: string) => worktrees.removeScratch(path) };
-  const dispatcher = new Dispatcher({ db, identity, leases, agents, repoRoot: root, mcpUrl, claim, missions, scratch, runTimeoutMs: 45 * 60_000, context: () => config.projectContext, playbooks: (n) => playbooks.catalogue(n), ...(sandbox ? { sandbox } : {}) });
+  const budget = new BudgetService(db);
+  const dispatcher = new Dispatcher({ db, identity, leases, agents, repoRoot: root, mcpUrl, claim, missions, budget, landing: () => Boolean(config.verifyCommand || config.landWithoutVerify), scratch, runTimeoutMs: 45 * 60_000, context: () => config.projectContext, playbooks: (n) => playbooks.catalogue(n), ...(sandbox ? { sandbox } : {}) });
   // Both read the config each time they run, so changing them in the cockpit needs no restart.
-  const notifier = new Notifier({ db, missions, dispatcher, config: () => config.notifications, cockpitUrl: () => `http://127.0.0.1:${port}` });
+  const notifier = new Notifier({ db, missions, dispatcher, budget, config: () => config.notifications, cockpitUrl: () => `http://127.0.0.1:${port}` });
   const schedules = new ScheduleService({ db, missions, board, connectedAgents: () => dispatcher.agentIds(), isPaused: () => dispatcher.isPaused() });
   const updates = new UpdateChecker({ current: options.version ?? '0.0.0', enabled: () => Boolean(config.updateCheck) });
-  registerCockpit({ server, board, db, dispatcher, missions, leases, playbooks, schedules, ...(sandbox ? { sandbox } : {}), extra: () => ({ ...setupState({ config, registry, root, notifier, updates }), version: options.version ?? null }) });
-  registerControls({ server, board, gate, review, dispatcher, missions, leases, templates: new TemplateStore(join(root, '.agentmesh')), playbooks, schedules });
+  registerCockpit({ server, board, db, dispatcher, missions, leases, playbooks, schedules, budget, ...(sandbox ? { sandbox } : {}), extra: () => ({ ...setupState({ config, registry, root, notifier, updates }), version: options.version ?? null }) });
+  registerControls({ server, board, gate, review, dispatcher, missions, leases, templates: new TemplateStore(join(root, '.agentmesh')), playbooks, schedules, budget });
   registerSetup({ server, board, identity, dispatcher, registry, root, config, allowedTools: allowed, notifier, updates });
 
   // 4. The merge queue always exists; it lands only while the Human has set a check (or opted in to landing
@@ -231,6 +238,7 @@ export async function startDaemon(options: StartOptions): Promise<RunningDaemon>
     updates,
     schedules,
     mergeQueue,
+    registry,
     stopRequested,
     stop: async () => {
       dispatcher.stop();

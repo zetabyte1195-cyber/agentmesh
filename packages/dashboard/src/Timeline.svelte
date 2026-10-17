@@ -35,11 +35,11 @@
     events = [],
     tasks = [],
     agents = [],
-  } = $props<{
+  }: {
     events?: MeshEvent[];
     tasks?: Task[];
     agents?: Agent[];
-  }>();
+  } = $props();
 
   let selectedAgent = $state<string>('all');
   let selectedTask = $state<string>('all');

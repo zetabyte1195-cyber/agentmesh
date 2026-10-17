@@ -10,12 +10,14 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { BudgetService } from '../budget/index.js';
 import type { SqliteDatabase } from '../db/index.js';
 import type { Migration } from '../db/index.js';
 import { withImmediateTransaction } from '../db/index.js';
 import type { IdentityService, Principal } from '../identity/index.js';
 import type { LeaseArbiter } from '../leases/index.js';
 import { type MissionService, planJob, reviewJob, reviseJob, splitJob } from '../missions/index.js';
+import { MISSION_PHASE_PREFIX } from '../missions/service.js';
 import type { AgentCommand } from '../runner/commands.js';
 import { type RunResult, type RunningAgent, startAgent } from '../runner/run.js';
 import { type SandboxRuntime, explainSandboxFailure } from '../sandbox/index.js';
@@ -99,6 +101,8 @@ export interface RunContext {
   /** Claude-format config ({type:'http', url, headers}) for claude --mcp-config. */
   claudeMcpConfig: string;
   toolConfigs?: { opencode: string; gemini: string };
+  /** The text written to toolConfigs.opencode (see PlatformRunContext). */
+  opencodeConfigJson?: string;
   inContainer?: boolean;
 }
 
@@ -111,6 +115,14 @@ export interface DispatcherOptions {
   playbooks?: (maxChars: number) => string;
   /** Container mode (experimental): agents it applies to run inside a container; while it is blocked they wait. */
   sandbox?: SandboxRuntime;
+  /** A mission that has reached its spending limit gets no new runs (see budget/). */
+  budget?: BudgetService;
+  /**
+   * Whether finished work can land on trunk (a project check is set, or the Human opted in to landing without one). A task
+   * that builds on another waits for it to have LANDED; when nothing can ever land, an audited (PASSED) one is enough, or the
+   * mission would wait for ever. Default: landing is on.
+   */
+  landing?: () => boolean;
   db: SqliteDatabase;
   identity: IdentityService;
   leases?: LeaseArbiter;
@@ -185,10 +197,11 @@ export function writeRunContext(token: string, mcpUrl: string): RunContext {
   // Other tools read the same connection in their own formats. Each file holds this run's token, lives in the run folder
   // (outside the repository) and is deleted with it when the run ends.
   const opencode = join(dir, 'opencode-mcp.json');
-  writeFileSync(opencode, JSON.stringify({ mcp: { agentmesh: { type: 'remote', url: mcpUrl, enabled: true, oauth: false, headers } } }));
+  const opencodeConfigJson = JSON.stringify({ mcp: { agentmesh: { type: 'remote', url: mcpUrl, enabled: true, oauth: false, headers } } });
+  writeFileSync(opencode, opencodeConfigJson);
   const gemini = join(dir, 'gemini-settings.json');
   writeFileSync(gemini, JSON.stringify({ mcpServers: { agentmesh: { httpUrl: mcpUrl, headers, trust: true } } }));
-  return { token, mcpUrl, dir, claudeMcpConfig, toolConfigs: { opencode, gemini } };
+  return { token, mcpUrl, dir, claudeMcpConfig, toolConfigs: { opencode, gemini }, opencodeConfigJson };
 }
 
 export class Dispatcher {
@@ -262,8 +275,10 @@ export class Dispatcher {
       const t = db.prepare('SELECT status FROM tasks WHERE id = ?').get(subject) as { status: string } | undefined;
       return Boolean(t && t.status !== 'COMMITTED');
     };
+    // Work of a cancelled or over-budget mission is not "given up" news: there is nothing to try again until that is dealt with.
+    const stopped = this.stoppedMissions();
     return rows
-      .filter((r) => stillOpen(r.subject) && this.running.get(r.agentId)?.taskId !== r.subject)
+      .filter((r) => stillOpen(r.subject) && !stopped.has(this.missionOf(r.subject) ?? '') && this.running.get(r.agentId)?.taskId !== r.subject)
       .map((r) => {
         const l = last.get(r.agentId, r.subject) as { status: string; detail: string | null };
         return { ...r, lastStatus: l.status, lastDetail: l.detail };
@@ -332,16 +347,40 @@ export class Dispatcher {
     return started;
   }
 
+  /** Missions nothing may be started for: over their spending limit, or cancelled (cancelling leaves the tasks on the board). */
+  private stoppedMissions(): Set<string> {
+    const stopped = new Set(this.options.budget?.reached().keys() ?? []);
+    if (this.options.missions) for (const m of this.options.db.prepare("SELECT id FROM missions WHERE status = 'CANCELLED'").all() as { id: string }[]) stopped.add(m.id);
+    return stopped;
+  }
+
+  /** The mission a run's subject belongs to: "mission:M1" or one of its tasks. Null for a task of no mission. */
+  private missionOf(subject: string): string | null {
+    if (subject.startsWith(MISSION_PHASE_PREFIX)) return subject.slice(MISSION_PHASE_PREFIX.length);
+    const phase = (this.options.db.prepare('SELECT phase_id FROM tasks WHERE id = ?').get(subject) as { phase_id: string | null } | undefined)?.phase_id;
+    return phase?.startsWith(MISSION_PHASE_PREFIX) ? phase.slice(MISSION_PHASE_PREFIX.length) : null;
+  }
+
   /** Priority: audits this agent may do (they unblock others) → handoffs to it → claimable tasks for it. */
   nextWork(agent: DispatchableAgent): Work | null {
     const db = this.options.db;
+    // Missions that are stopped, because they reached their spending limit or were cancelled: nothing is started for them
+    // (steps, tasks, reviews, messages). Runs already going finish, as with pausing. Other missions are not held up: each
+    // pick below skips these.
+    const stopped = this.stoppedMissions();
+    const taskStopped = (taskId: string | null | undefined): boolean => {
+      if (!taskId || stopped.size === 0) return false;
+      const phase = (db.prepare('SELECT phase_id FROM tasks WHERE id = ?').get(taskId) as { phase_id: string | null } | undefined)?.phase_id;
+      return Boolean(phase?.startsWith(MISSION_PHASE_PREFIX) && stopped.has(phase.slice(MISSION_PHASE_PREFIX.length)));
+    };
     // A mission step comes first: the Human is watching it, and it is short.
-    const mission = this.options.missions?.workFor(agent.agentId);
-    if (mission && this.mayRetry(agent.agentId, missionKey(mission.missionId))) return this.missionWork(mission);
+    // (A mission that is stopped, or cooling down after a failure, is passed over so the next one can be started.)
+    const mission = this.options.missions?.workFor(agent.agentId, (id) => stopped.has(id) || !this.mayRetry(agent.agentId, missionKey(id)));
+    if (mission) return this.missionWork(mission);
 
     // An audit this agent already claimed whose run ended without a verdict (it stopped to ask a question, or
     // failed) is theirs to finish: nobody else can, and the task would sit in AUDITING forever.
-    const claimedAudit = (db.prepare("SELECT id FROM tasks WHERE status = 'AUDITING' AND reviewing_agent_id = ? ORDER BY updated_at, id").all(agent.agentId) as { id: string }[]).find((r) => this.mayRetry(agent.agentId, r.id));
+    const claimedAudit = (db.prepare("SELECT id FROM tasks WHERE status = 'AUDITING' AND reviewing_agent_id = ? ORDER BY updated_at, id").all(agent.agentId) as { id: string }[]).find((r) => !taskStopped(r.id) && this.mayRetry(agent.agentId, r.id));
     if (claimedAudit) {
       return { kind: 'AUDIT', taskId: claimedAudit.id, job: `You already claimed the audit of task ${claimedAudit.id} but ended without a verdict. Read the answers and messages to you (mesh_get_board, mesh_get_task), read the pinned diff with mesh_get_diff, run the project checks with mesh_run_verification, then finish with mesh_submit_audit using the pinned diffHash.` };
     }
@@ -353,7 +392,7 @@ export class Dispatcher {
       )
       .all(agent.platform, agent.agentId)
       .map((r) => r as { id: string })
-      .find((r) => this.mayRetry(agent.agentId, r.id));
+      .find((r) => !taskStopped(r.id) && this.mayRetry(agent.agentId, r.id));
     if (audit) return { kind: 'AUDIT', taskId: audit.id, job: `Audit task ${audit.id} (READY_FOR_REVIEW): mesh_claim_audit, read the pinned diff with mesh_get_diff, run the project checks with mesh_run_verification (no shell commands needed), review critically against the acceptance criteria, then mesh_submit_audit with the pinned diffHash.` };
 
     // A handoff is DELIVERED once a run of its recipient that started after it arrived has succeeded:
@@ -363,7 +402,7 @@ export class Dispatcher {
     // note to the author of a task that already PASSED/landed needs no run of its own (dogfood: such
     // runs cost quota and held up landing); it is still shown on the board. The Human's always get a run.
     const retryCutoff = sqlTime(new Date(this.now().getTime() - RETRY_AFTER_MS));
-    const handoff = db
+    const handoffs = db
       .prepare(
         `SELECT h.task_id FROM handoffs h LEFT JOIN tasks t ON t.id = h.task_id
           WHERE h.to_agent_id = ?
@@ -372,9 +411,10 @@ export class Dispatcher {
             AND NOT EXISTS (SELECT 1 FROM dispatch_runs r WHERE r.agent_id = h.to_agent_id AND r.kind = 'HANDOFF' AND r.status != 'RUNNING' AND r.started_at >= h.created_at AND r.ended_at > ?)
             AND NOT (coalesce((SELECT platform FROM agents WHERE id = h.from_agent_id), '') != 'HUMAN'
                      AND t.status IN ('PASSED', 'COMMITTED') AND t.assigned_agent_id = h.to_agent_id)
-          ORDER BY h.created_at LIMIT 1`,
+          ORDER BY h.created_at`,
       )
-      .get(agent.agentId, MAX_ATTEMPTS_PER_TASK, retryCutoff) as { task_id: string } | undefined;
+      .all(agent.agentId, MAX_ATTEMPTS_PER_TASK, retryCutoff) as { task_id: string }[];
+    const handoff = handoffs.find((h) => !taskStopped(h.task_id));
     if (handoff) return { kind: 'HANDOFF', taskId: handoff.task_id, job: `You have new handoffs (latest on task ${handoff.task_id}). Read them on the board and act on them.` };
 
     // Finish what it already holds before claiming more: a run that died after the claim (live run #4)
@@ -383,8 +423,9 @@ export class Dispatcher {
     const heldRows = db
       .prepare("SELECT id, status FROM tasks WHERE status IN ('CLAIMED', 'IN_PROGRESS', 'TESTING', 'REJECTED') AND assigned_agent_id = ? AND worktree_path IS NOT NULL ORDER BY updated_at, id")
       .all(agent.agentId) as { id: string; status: string }[];
-    const heldIds = heldRows.map((r) => r.id);
-    const held = heldRows.find((r) => this.mayRetry(agent.agentId, r.id));
+    // A held task of a stopped mission waits (it stays the agent's) without keeping the agent from other missions' work.
+    const heldIds = heldRows.filter((r) => !taskStopped(r.id)).map((r) => r.id);
+    const held = heldRows.find((r) => !taskStopped(r.id) && this.mayRetry(agent.agentId, r.id));
     if (held) {
       // REJECTED allows no leases or commits: the author reopens it first (REJECTED → IN_PROGRESS is an author move).
       const reopen = held.status === 'REJECTED' ? `It was sent back by its reviewer: read the audit notes, then reopen it with mesh_update_status (status IN_PROGRESS) before anything else. ` : '';
@@ -407,10 +448,15 @@ export class Dispatcher {
       )
       .all(JSON.stringify(ownerNames(agent))) as { id: string; prerequisites: string }[];
     const ready = todo.find((t) =>
+      !taskStopped(t.id) &&
       this.mayRetry(agent.agentId, t.id) &&
       (JSON.parse(t.prerequisites) as string[]).every((p) => {
         const s = db.prepare('SELECT status FROM tasks WHERE id = ?').get(p) as { status: string } | undefined;
-        return s?.status === 'PASSED' || s?.status === 'COMMITTED';
+        // A task that builds on another waits until that one has LANDED on trunk, not merely passed its audit. Its workspace
+        // is created from trunk, so before the landing the files it builds on are not there. (Found in a real mission: the
+        // dependent task failed on a missing file, had to improvise, its patch changed under the rebase, and it needed a
+        // second audit. Landing takes seconds.)
+        return s?.status === 'COMMITTED' || (s?.status === 'PASSED' && this.options.landing?.() === false);
       }),
     );
     if (ready) return { kind: 'TASK', taskId: ready.id, job: `Claim task ${ready.id} with mesh_claim_task, work only in the worktree it returns, lease what you edit, check your work with mesh_run_verification, commit with mesh_commit, then mesh_submit_for_review.` };

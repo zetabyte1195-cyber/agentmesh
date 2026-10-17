@@ -6,11 +6,11 @@
 import { randomBytes } from 'node:crypto';
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
-import type { AddressInfo } from 'node:net';
 import { extname, join, resolve, sep } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { AuthError, type IdentityService, ImpersonationError, type Principal } from '../identity/index.js';
 import { extractBearer } from '../identity/tokens.js';
+import { listenFree } from './ports.js';
 
 export const BIND_HOST = '127.0.0.1';
 const MIME: Record<string, string> = {
@@ -89,11 +89,8 @@ export class DaemonServer {
   }
 
   async listen(): Promise<number> {
-    await new Promise<void>((resolve, reject) => {
-      this.http.once('error', reject);
-      this.http.listen(this.options.port ?? 0, BIND_HOST, () => resolve());
-    });
-    this.port = (this.http.address() as AddressInfo).port;
+    // Never a port that browsers and Node refuse (see ports.ts): a port chosen by the system is chosen again if it is one.
+    this.port = await listenFree(this.http, BIND_HOST, this.options.port ?? 0);
     return this.port;
   }
 

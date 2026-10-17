@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a new advisory in a dependency shows up even when nobody has pushed.
+    - cron: '17 5 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+        include:
+          # Expected to work and never tried by the authors: a failure here is information, not a blocker.
+          - os: macos-latest
+            node: 24
+            experimental: true
+    steps:
+      # Actions are pinned to exact commits, not tags that can move. The comment says which release each one is.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      # The database engine ships ready-made binaries for every platform, so installing without scripts needs no
+      # compiler (npm would otherwise try to build it, because the package also contains the build recipe).
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm run check
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # What ships to people: the packages the program needs to run.
+      - run: npm audit --omit=dev --audit-level=high

@@ -8,6 +8,7 @@
 //     package.json, README.md
 //   release/agentmesh-<version>.tgz     what you send to a friend:  npm install -g ./agentmesh-<version>.tgz
 import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,4 +75,10 @@ writeFileSync(
 const packed = execSync(`npm pack --pack-destination "${join(root, 'release')}"`, { cwd: out, encoding: 'utf8' }).trim().split(/\r?\n/).at(-1);
 // The same file under a fixed name, so ".../releases/latest/download/agentmesh.tgz" always installs the newest one.
 cpSync(join(root, 'release', packed), join(root, 'release', 'agentmesh.tgz'));
-console.log(`Built release/${packed} and release/agentmesh.tgz (agentmesh ${version}, better-sqlite3 ^${sqlite})`);
+// A SHA-256 checksum file next to each package, in the format sha256sum reads. `agentmesh update` checks the download
+// against it. It catches a damaged or cut-off download; it cannot catch a release that was replaced on purpose, because
+// both files come from the same place (SECURITY.md says so).
+const sha256 = createHash('sha256').update(readFileSync(join(root, 'release', packed))).digest('hex');
+writeFileSync(join(root, 'release', `${packed}.sha256`), `${sha256}  ${packed}\n`);
+writeFileSync(join(root, 'release', 'agentmesh.tgz.sha256'), `${sha256}  agentmesh.tgz\n`);
+console.log(`Built release/${packed} and release/agentmesh.tgz (agentmesh ${version}, better-sqlite3 ^${sqlite}), sha256 ${sha256}`);

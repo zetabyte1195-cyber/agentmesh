@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { listenFree } from '../server/ports.js';
 import { initProject } from '../init/index.js';
 import { signBody } from '../notify/index.js';
 import { callDaemon, projectRoot } from './runtime.js';
@@ -70,7 +71,7 @@ describe('notification webhook (task 1)', () => {
         res.end('ok');
       });
     });
-    await new Promise<void>((r) => hook!.listen(0, '127.0.0.1', r));
+    await listenFree(hook!, '127.0.0.1');
     const url = `http://127.0.0.1:${(hook.address() as AddressInfo).port}/hook`;
 
     await expect(post('/api/notifications', { webhookUrl: 'ftp://x/y' })).rejects.toThrow(/https:\/\//);
@@ -238,7 +239,7 @@ describe('adding a tool from a recipe (task 10)', () => {
   it('lists the recipes, adds one as not verified, saves it to the config, and refuses duplicates and unknown ones', async () => {
     type R = { id: string; added: boolean; caveats: string[] };
     const before = (await state()).setup.recipes as R[];
-    expect(before.map((r) => [r.id, r.added])).toEqual([['CODEX', false], ['GEMINI_CLI', false], ['OPENCODE', false]]);
+    expect(before.map((r) => [r.id, r.added])).toEqual([['CODEX', false], ['GEMINI_CLI', false], ['OPENCODE', false], ['CLAUDE_OLLAMA', false]]);
     expect(before.every((r) => r.caveats.length > 0)).toBe(true);
 
     expect(await post('/api/platforms/recipe', { id: 'OPENCODE' })).toMatchObject({ id: 'OPENCODE', verified: false });

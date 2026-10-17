@@ -12,7 +12,7 @@ import type { IdentityService, Principal } from '../identity/index.js';
 import { agentIdFor } from '../init/agents.js';
 import { detectProject } from '../init/detect.js';
 import { type ProjectConfig, initProject } from '../init/init.js';
-import { type PlatformRegistry, RECIPES, ensureAgyMcpRule, recipeById } from '../platforms/index.js';
+import { type PlatformRegistry, RECIPES, RecipeError, ensureAgyMcpRule, isThisComputer, launcher, recipeById, recipeConfig, usableAddress } from '../platforms/index.js';
 import { type DaemonServer, HttpError } from '../server/index.js';
 import type { UpdateChecker } from '../update/index.js';
 
@@ -51,7 +51,7 @@ export function setupState(o: Pick<SetupOptions, 'config' | 'registry' | 'root' 
         maxContext: MAX_PROJECT_CONTEXT,
       },
       // Ready-made definitions for other tools; every one is added as "not verified".
-      recipes: RECIPES.map((r) => ({ id: r.id, title: r.title, summary: r.summary, caveats: r.caveats, install: r.install, signIn: r.signIn, docs: r.docs, added: o.registry.has(r.id) })),
+      recipes: RECIPES.map((r) => ({ id: r.id, title: r.title, summary: r.summary, caveats: r.caveats, install: r.install, signIn: r.signIn, docs: r.docs, fields: (r.fields ?? []).map((f) => ({ id: f.id, label: f.label, hint: f.hint, default: f.default, suggest: f.suggest ?? null })), added: o.registry.has(r.id), current: o.registry.has(r.id) && r.current ? r.current(o.config.customPlatforms?.find((c) => c.id === r.id) ?? r.config) : null })),
       // The secret is never sent back to the page: only whether one is set.
       notifications: { webhookUrl: o.config.notifications?.webhookUrl ?? null, hasSecret: Boolean(o.config.notifications?.webhookSecret), last: o.notifier?.last() ?? null },
       update: { enabled: Boolean(o.config.updateCheck), info: o.updates?.info() ?? null, error: o.updates?.error() ?? null },
@@ -66,6 +66,28 @@ export function setupState(o: Pick<SetupOptions, 'config' | 'registry' | 'root' 
       })),
     },
   };
+}
+
+/** No list of models is anywhere near this long; a longer answer is not read to the end. */
+const MAX_MODEL_LIST_BYTES = 1_048_576;
+
+/** The body as text, or null if it is longer than `limit` (the rest is not read). */
+async function readTextUpTo(res: Response, limit: number): Promise<string | null> {
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > limit) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function saveConfig(o: SetupOptions): void {
@@ -196,20 +218,94 @@ export function registerSetup(o: SetupOptions): void {
     } catch {
       throw new HttpError(400, 'Body must be JSON');
     }
-    const r = z.object({ id: z.string().min(1).max(40) }).strict().safeParse(raw);
+    const r = z.object({ id: z.string().min(1).max(40), values: z.record(z.string(), z.string().max(300)).optional() }).strict().safeParse(raw);
     if (!r.success) throw new HttpError(400, r.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; '));
     const recipe = recipeById(r.data.id);
     if (!recipe) throw new HttpError(404, `There is no recipe "${r.data.id}". Known: ${RECIPES.map((x) => x.id).join(', ')}`);
-    if (o.registry.has(recipe.id)) throw new HttpError(409, `${recipe.title} is already added.`);
+    // A recipe with choices that is already added is changed (a typo in the model, another model to try); one without has nothing to change.
+    const existing = o.registry.has(recipe.id);
+    if (existing && !recipe.fields?.length) throw new HttpError(409, `${recipe.title} is already added.`);
+    let definition;
     try {
-      o.registry.add(recipe.config);
+      definition = recipeConfig(recipe, r.data.values ?? {});
+    } catch (err) {
+      if (err instanceof RecipeError) throw new HttpError(400, err.message);
+      throw err;
+    }
+    try {
+      o.registry.check(definition);
     } catch (err) {
       throw new HttpError(409, (err as Error).message);
     }
-    o.config.customPlatforms = [...(o.config.customPlatforms ?? []), recipe.config];
-    saveConfig(o);
-    o.board.recordControl(human(principal), `added ${recipe.title} from a recipe (not verified yet)`);
-    return { id: recipe.id, label: recipe.title, verified: false };
+    // The file first: if it cannot be written, nothing was changed in memory and trying again is possible.
+    const had = o.config.customPlatforms;
+    const list = had ?? [];
+    o.config.customPlatforms = list.some((c) => c.id === recipe.id) ? list.map((c) => (c.id === recipe.id ? definition : c)) : [...list, definition];
+    try {
+      saveConfig(o);
+    } catch (err) {
+      if (had === undefined) delete o.config.customPlatforms;
+      else o.config.customPlatforms = had;
+      throw err;
+    }
+    if (existing) o.registry.replace(definition);
+    else o.registry.add(definition);
+    const choices = recipe.current ? recipe.current(definition) : {};
+    const set = Object.entries(choices).map(([k, v]) => `${k} ${v}`).join(', ');
+    const address = choices['address'];
+    const away = address && !isThisComputer(address) ? `. The address ${address} is not this computer: what the agent reads in the project is sent there` : '';
+    o.board.recordControl(human(principal), existing ? `changed ${recipe.title}: ${set} (not verified yet)${away}` : `added ${recipe.title} from a recipe (not verified yet)${set ? `: ${set}` : ''}${away}`);
+    return { id: recipe.id, label: recipe.title, verified: false, changed: existing };
+  });
+
+  // The models Ollama has pulled, so the cockpit can offer them. Only an address on this computer is ever asked: this must not
+  // become a way to look at other machines from here.
+  o.server.route('POST', '/api/platforms/ollama-models', 'human', async ({ body }) => {
+    let raw: unknown;
+    try {
+      raw = JSON.parse((await body()) || '{}');
+    } catch {
+      throw new HttpError(400, 'Body must be JSON');
+    }
+    const r = z.object({ address: z.string().max(200).optional() }).strict().safeParse(raw);
+    if (!r.success) throw new HttpError(400, 'address: expected text');
+    // Blank means the usual address here, as it does when the recipe is added.
+    const address = (r.data.address ?? '').trim() || 'http://127.0.0.1:11434';
+    if (!/^https?:\/\/[A-Za-z0-9._-]+(:[0-9]{1,5})?$/.test(address)) throw new HttpError(400, 'The address should look like http://127.0.0.1:11434 (no path at the end).');
+    if (!usableAddress(address)) throw new HttpError(400, `"${address}" does not look like an address: check the numbers and the port.`);
+    if (!isThisComputer(address)) return { checked: false, reachable: null, models: [], note: 'Models are only listed for Ollama on this computer. Type the model name yourself.' };
+    const silent = { checked: true, reachable: false, models: [], note: `Ollama did not answer at ${address}. Start it, then look again.` };
+    let res: Response;
+    try {
+      // A redirect is never followed: it could lead off this computer, and this must not become a way to look at other machines.
+      res = await fetch(`${address}/api/tags`, { redirect: 'error', signal: AbortSignal.timeout(3000) });
+    } catch (err) {
+      const why = `${(err as Error).message} ${((err as { cause?: Error }).cause?.message) ?? ''}`;
+      if (/redirect/i.test(why)) return { checked: true, reachable: false, models: [], note: 'Something at that address tried to send AgentMesh somewhere else. That is not followed. Check the address.' };
+      return silent;
+    }
+    if (!res.ok) return { checked: true, reachable: false, models: [], note: `Ollama answered ${res.status}.` };
+    let text: string | null;
+    try {
+      text = await readTextUpTo(res, MAX_MODEL_LIST_BYTES);
+    } catch {
+      return silent;
+    }
+    if (text === null) return { checked: true, reachable: false, models: [], note: 'The answer is too long to be a list of models, so it was not read. Check the address.' };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return { checked: true, reachable: false, models: [], note: `Something answered at ${address}, but it is not Ollama (it did not send a list of models).` };
+    }
+    const listed = parsed !== null && typeof parsed === 'object' && Array.isArray((parsed as { models?: unknown }).models) ? ((parsed as { models: unknown[] }).models) : [];
+    const models = listed.flatMap((m) => {
+      if (m === null || typeof m !== 'object') return [];
+      const { name, size, remote_host: remote } = m as { name?: unknown; size?: unknown; remote_host?: unknown };
+      if (typeof name !== 'string') return [];
+      return [{ name, sizeGb: typeof size === 'number' && Number.isFinite(size) ? Math.round(size / 1e8) / 10 : null, cloud: Boolean(remote) || /[:-]cloud$/i.test(name) }];
+    });
+    return { checked: true, reachable: true, models };
   });
 
   o.server.route('POST', '/api/agents', 'human', async ({ principal, body }) => {
@@ -224,7 +320,7 @@ export function registerSetup(o: SetupOptions): void {
     const adapter = o.registry.get(r.data.platform);
     if (!adapter) throw new HttpError(400, `Unknown platform "${r.data.platform}". Known: ${o.registry.list().map((p) => p.id).join(', ')}`);
     const detection = await adapter.detect();
-    if (!detection.installed) throw new HttpError(409, `${adapter.label} is not installed on this machine (no "${adapter.id}" command found). Install it and sign in once, then connect it.`);
+    if (!detection.installed) throw new HttpError(409, `${adapter.label} is not installed on this machine. Install it and sign in once, then connect it.`);
     if (detection.problem) throw new HttpError(409, `${adapter.label} is installed but did not answer correctly: ${detection.problem}`);
     const taken = new Set(o.config.agents.map((a) => a.id));
     const id = r.data.id ?? agentIdFor(adapter, taken);
@@ -238,7 +334,7 @@ export function registerSetup(o: SetupOptions): void {
       platform: adapter.id,
       rulebook: adapter.rulebook,
       ownerNames: [adapter.friendlyName],
-      command: (prompt, cwd, run) => adapter.command({ prompt, cwd, run, allowedTools: o.allowedTools }),
+      command: launcher(o.registry, adapter.id, o.allowedTools),
     });
     // Every agent's rulebook mentions the others; rewrite them and commit so new workspaces have them.
     const warnings: string[] = [];

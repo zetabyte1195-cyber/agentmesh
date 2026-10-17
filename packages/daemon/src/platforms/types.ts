@@ -13,6 +13,8 @@ export interface PlatformRunContext {
   claudeMcpConfig: string;
   /** The same connection written in other tools' own config formats (opencode, Gemini CLI), for {mcpConfigFile:<tool>}. */
   toolConfigs?: { opencode: string; gemini: string };
+  /** The text of the opencode file above, for a tool that takes its configuration inline. Read on this computer when the run folder was made, so it is there even inside a container, where the file's path is not one this computer can read. */
+  opencodeConfigJson?: string;
   /** True when the tool will run inside a container: paths are the container's, and the tool is found there, not on this computer. */
   inContainer?: boolean;
 }

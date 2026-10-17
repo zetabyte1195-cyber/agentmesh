@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { writeRunContext } from '../dispatch/dispatcher.js';
 import { platformInstaller } from '../doctor/install.js';
 import { CustomPlatformSchema, customAdapter } from './custom.js';
-import { RECIPES, recipeById } from './recipes.js';
+import { RECIPES, RecipeError, isThisComputer, recipeById, recipeConfig } from './recipes.js';
 import { createRegistry } from './registry.js';
 
 const URL = 'http://127.0.0.1:8934/mcp';
@@ -23,7 +23,7 @@ const built = (id: string) => {
 
 describe('the recipes are valid definitions', () => {
   it('each parses against the same schema as a hand-written one, is not a reserved name, and is shown as unverified', () => {
-    expect(RECIPES.map((r) => r.id)).toEqual(['CODEX', 'GEMINI_CLI', 'OPENCODE']);
+    expect(RECIPES.map((r) => r.id)).toEqual(['CODEX', 'GEMINI_CLI', 'OPENCODE', 'CLAUDE_OLLAMA']);
     for (const r of RECIPES) {
       expect(() => CustomPlatformSchema.parse(r.config), r.id).not.toThrow();
       expect(r.config.id).toBe(r.id);
@@ -119,5 +119,102 @@ describe('registry and installers', () => {
     expect(platformInstaller('GEMINI_CLI', 'darwin')).toMatchObject({ display: 'npm install -g @google/gemini-cli', binary: 'gemini' });
     expect(platformInstaller('OPENCODE', 'win32')).toMatchObject({ display: 'npm install -g opencode-ai', binary: 'opencode', shell: true });
     expect(platformInstaller('SOMETHING_ELSE')).toBeNull();
+  });
+});
+
+describe('Claude Code on a local model (Ollama)', () => {
+  const recipe = () => recipeById('CLAUDE_OLLAMA')!;
+  const args = (values: Record<string, string>) => recipeConfig(recipe(), values).args;
+
+  it('is built from the person\'s choices: the model goes on the command line and in every model setting, the address in the connection', () => {
+    const c = recipeConfig(recipe(), { model: 'qwen3:8b', address: 'http://127.0.0.1:11500' });
+    expect(c.args.slice(c.args.indexOf('--model'), c.args.indexOf('--model') + 2)).toEqual(['--model', 'qwen3:8b']);
+    expect(c.env).toMatchObject({
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:11500',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'qwen3:8b',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'qwen3:8b',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'qwen3:8b',
+      CLAUDE_CODE_SUBAGENT_MODEL: 'qwen3:8b',
+    });
+    expect(CustomPlatformSchema.parse(c).id).toBe('CLAUDE_OLLAMA');
+  });
+
+  it('uses this computer\'s Ollama unless told otherwise', () => {
+    expect(recipeConfig(recipe(), { model: 'gemma4:e2b' }).env!['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:11434');
+    expect(recipeConfig(recipe(), { model: 'gemma4:e2b', address: '  ' }).env!['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:11434');
+  });
+
+  it('runs Claude Code the way that was found to work with a small model, and keeps the safety of the normal Claude runs', () => {
+    const a = args({ model: 'm' });
+    expect(a).toContain('--bare'); // without it the person's own plugins and hooks bury the task
+    expect(a).toContain('--strict-mcp-config'); // only AgentMesh's tools
+    expect(a).toContain('--append-system-prompt-file'); // the project rulebook is still given
+    expect(a.slice(a.indexOf('--permission-mode'), a.indexOf('--permission-mode') + 2)).toEqual(['--permission-mode', 'acceptEdits']);
+    expect(a.slice(a.indexOf('--allowedTools') + 1)).toContain('mcp__agentmesh'); // the same allow-list as the built-in Claude platform
+    expect(a.join(' ')).not.toMatch(/dangerously|bypass/i);
+  });
+
+  it('drops the cost Claude Code prints (it is not real money), and still gets loop protection', () => {
+    const c = recipeConfig(recipe(), { model: 'm' });
+    expect(c.reportsCost).toBe(false);
+    expect(c.output).toBe('claude-stream-json');
+    expect(customAdapter(c).loopProtection).toBe(true);
+  });
+
+  it('refuses a missing model or a bad address, in words a person can act on, and never builds a half-made definition', () => {
+    expect(() => recipeConfig(recipe(), {})).toThrow(RecipeError);
+    expect(() => recipeConfig(recipe(), {})).toThrow(/Model: Type the name of a model you have pulled/);
+    for (const bad of ['--bare', 'a b', 'x;rm', '-x', '']) expect(() => recipeConfig(recipe(), { model: bad }), JSON.stringify(bad)).toThrow(/Model:/);
+    for (const bad of ['127.0.0.1:11434', 'http://user:pw@127.0.0.1:11434', 'http://127.0.0.1:11434/v1', 'ftp://127.0.0.1', 'http://a b']) {
+      expect(() => recipeConfig(recipe(), { model: 'm', address: bad }), bad).toThrow(/Ollama address:/);
+    }
+  });
+
+  it('is honest: says the context length must be raised, what was tried, and that a dollar limit cannot see it', () => {
+    const text = recipe().caveats.join(' ');
+    expect(text).toContain('32,768');
+    expect(text).toContain('4,096');
+    expect(text).toContain('Neither was taken through a whole mission');
+    expect(text).toContain('a dollar limit on a mission cannot see these runs');
+  });
+
+  it('a recipe without choices is added exactly as it is', () => {
+    expect(recipeConfig(recipeById('CODEX')!, {})).toBe(recipeById('CODEX')!.config);
+  });
+
+  it('refuses a choice it does not have, instead of quietly using the default (a typo in "address" must not mean "this computer")', () => {
+    expect(() => recipeConfig(recipe(), { model: 'm', url: 'http://127.0.0.1:11500' })).toThrow(RecipeError);
+    expect(() => recipeConfig(recipe(), { model: 'm', url: 'http://127.0.0.1:11500' })).toThrow(/"url" is not something this recipe asks for.*model, address/);
+    expect(() => recipeConfig(recipeById('CODEX')!, { model: 'x' })).toThrow(/"model" is not something this recipe asks for.*no choices/);
+    expect(() => recipeConfig(recipe(), JSON.parse('{"model":"m","__proto__x":"1"}'))).toThrow(RecipeError);
+  });
+
+  it('refuses an address that looks right but is not one (a port above 65535, an octet above 255), as a RecipeError and not a crash', () => {
+    for (const bad of ['http://127.0.0.1:99999', 'http://localhost:65536', 'http://127.0.0.256:11434', 'http://4294967296:11434', 'http://1.2.3.4.5:11434']) {
+      expect(() => recipeConfig(recipe(), { model: 'm', address: bad }), bad).toThrow(RecipeError);
+      expect(() => recipeConfig(recipe(), { model: 'm', address: bad }), bad).toThrow(/Ollama address:/);
+    }
+    expect(recipeConfig(recipe(), { model: 'm', address: 'http://127.0.0.1:65535' }).env!['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:65535');
+  });
+
+  it('tells the choices back from a definition, so the cockpit can show what is set and change it', () => {
+    const c = recipeConfig(recipe(), { model: 'qwen3:8b', address: 'http://127.0.0.1:11500' });
+    expect(recipe().current!(c)).toEqual({ model: 'qwen3:8b', address: 'http://127.0.0.1:11500' });
+    expect(recipe().current!({ ...c, env: {} })).toEqual({ model: 'qwen3:8b', address: '' }); // a hand-edited definition: what is there, nothing invented
+  });
+
+  it('does not promise that nothing leaves the machine without saying that holds for Ollama on this computer', () => {
+    const r = recipe();
+    expect(r.summary).toMatch(/by default on your own computer/);
+    expect(r.summary).toMatch(/another address or a model marked cloud sends/);
+    expect(r.signIn).toMatch(/on your own computer/);
+    expect(r.caveats.join(' ')).toMatch(/marked cloud runs on Ollama's servers/);
+  });
+
+  it('knows which addresses are this computer', () => {
+    expect(isThisComputer('http://127.0.0.1:11434')).toBe(true);
+    expect(isThisComputer('http://localhost:1')).toBe(true);
+    expect(isThisComputer('http://2130706433:11434')).toBe(true); // the same address written as one number
+    for (const other of ['http://192.168.1.50:11434', 'https://ollama.example.com', 'http://127.0.0.1.example.com', 'not a url', '']) expect(isThisComputer(other), other).toBe(false);
   });
 });

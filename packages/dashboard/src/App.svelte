@@ -55,12 +55,13 @@
   // With no agent connected the only useful place is Setup; otherwise start on Home.
   const view = $derived<View>(chosen ?? ((snapshot?.agents ?? []).some((a) => a.platform !== 'HUMAN') ? 'home' : 'setup'));
   const badges = $derived<Partial<Record<View, number>>>({
-    missions: (snapshot?.notices ?? []).filter((n) => n.kind === 'plan').length,
+    missions: (snapshot?.notices ?? []).filter((n) => n.kind === 'plan' || n.kind === 'budget').length,
     board: (snapshot?.notices ?? []).filter((n) => n.kind === 'question' || n.kind === 'stuck').length,
     schedules: (snapshot?.schedules?.items ?? []).filter((s) => s.disabledReason).length,
   });
   let auth = $state<'checking' | 'ok' | 'login'>('checking');
-  let live = $state(false);
+  // Not yet opened is not the same as lost: the first connection is made just after the first snapshot arrives.
+  let link = $state<'connecting' | 'live' | 'lost'>('connecting');
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
   const workers = $derived((snapshot?.agents ?? []).filter((a) => a.platform !== 'HUMAN'));
@@ -95,14 +96,14 @@
 
   function connect(): void {
     const ws = new WebSocket(`ws://${location.host}/ws/cockpit`);
-    ws.onopen = () => (live = true);
+    ws.onopen = () => (link = 'live');
     ws.onmessage = (m) => {
       const msg = JSON.parse(String(m.data)) as { type: string; payload: MeshEvent };
       if (msg.type === 'EVENT' && snapshot) snapshot.events = [msg.payload, ...snapshot.events].slice(0, 200);
       scheduleRefresh();
     };
     ws.onclose = () => {
-      live = false;
+      link = 'lost';
       if (auth === 'ok') setTimeout(connect, 2000);
     };
   }
@@ -113,13 +114,19 @@
     if (confirm(`Release the ${n} file lock${n === 1 ? '' : 's'} held for ${taskId}? The agent has to take them again before it can commit.`)) void control('/api/leases/release', { taskId });
   }
 
-  function navigate(v: View): void {
+  /** Go to a screen, and optionally land on one element of it (for example one mission's card). */
+  async function navigate(v: View, focus?: string): Promise<void> {
     chosen = v;
     window.scrollTo({ top: 0 });
+    if (!focus) return;
+    await tick();
+    const el = document.getElementById(focus);
+    el?.scrollIntoView({ block: 'start' });
+    el?.focus({ preventScroll: true });
   }
   /** "New mission" is a shortcut to the form at the top of Missions. */
   async function newMission(): Promise<void> {
-    navigate('missions');
+    await navigate('missions');
     await tick();
     document.getElementById('m-title')?.focus();
   }
@@ -156,7 +163,7 @@
       projectName={snapshot.setup.project.name}
       agentCount={workers.length}
       version={snapshot.version}
-      {live}
+      {link}
       paused={snapshot.dispatch ? snapshot.dispatch.paused : null}
       onTogglePause={togglePause}
       {theme}
@@ -175,18 +182,21 @@
 
         {#if view === 'home'}
           <Home
-            connected={live}
+            connected={link !== 'lost'}
             agents={snapshot.agents}
             tasks={snapshot.tasks}
             missions={snapshot.missions}
             notices={snapshot.notices}
+            questions={snapshot.openQuestions}
             schedules={snapshot.schedules}
             usage={snapshot.usage?.byAgent ?? []}
             runs={snapshot.dispatch?.recentRuns ?? []}
             backoffs={snapshot.dispatch?.backoffs ?? []}
             paused={Boolean(snapshot.dispatch?.paused)}
+            landing={snapshot.setup.project.landing}
             onNavigate={navigate}
             onStop={(agentId) => void control('/api/stop-run', { agentId })}
+            onChanged={() => void load()}
           />
         {:else if view === 'missions'}
           <Missions missions={snapshot.missions} agents={snapshot.agents} usage={snapshot.usage?.byMission ?? []} onChanged={() => void load()} />
@@ -232,7 +242,7 @@
         {/if}
 
         <div class="mt-10 lg:hidden">
-          <TitleBlock projectName={snapshot.setup.project.name} agentCount={workers.length} version={snapshot.version} {live} paused={snapshot.dispatch ? snapshot.dispatch.paused : null} onTogglePause={togglePause} {theme} onTheme={pickTheme} error={controlError} />
+          <TitleBlock projectName={snapshot.setup.project.name} agentCount={workers.length} version={snapshot.version} {link} paused={snapshot.dispatch ? snapshot.dispatch.paused : null} onTogglePause={togglePause} {theme} onTheme={pickTheme} error={controlError} />
         </div>
       </div>
     </main>

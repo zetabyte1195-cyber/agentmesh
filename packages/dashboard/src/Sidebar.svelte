@@ -14,7 +14,7 @@
     projectName,
     agentCount,
     version,
-    live,
+    link,
     paused,
     onTogglePause,
     theme,
@@ -28,7 +28,7 @@
     projectName: string;
     agentCount: number;
     version: string | null;
-    live: boolean;
+    link: 'connecting' | 'live' | 'lost';
     paused: boolean | null;
     onTogglePause: () => void;
     theme: ThemeChoice;
@@ -69,6 +69,6 @@
   </nav>
 
   <div class="hidden p-4 lg:block">
-    <TitleBlock {projectName} {agentCount} {version} {live} {paused} {onTogglePause} {theme} {onTheme} {error} />
+    <TitleBlock {projectName} {agentCount} {version} {link} {paused} {onTogglePause} {theme} {onTheme} {error} />
   </div>
 </aside>

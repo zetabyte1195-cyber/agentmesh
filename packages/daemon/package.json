@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@agentmesh/core": "0.0.0",
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "better-sqlite3": "^13.0.3",
     "ws": "^8.21.3",
     "zod": "^3.25.76"

@@ -4,6 +4,7 @@
 import { z } from 'zod';
 import { type AuditGate, AuditGateError } from '../audit/index.js';
 import { BoardError, type BoardService } from '../board/index.js';
+import { BudgetError, type BudgetService } from '../budget/index.js';
 import type { Dispatcher } from '../dispatch/index.js';
 import { BUILT_IN_TEMPLATES, MissionError, type MissionService, TemplateError, type TemplateStore } from '../missions/index.js';
 import type { Principal } from '../identity/index.js';
@@ -24,6 +25,7 @@ export interface ControlsOptions {
   templates?: TemplateStore;
   playbooks?: PlaybookStore;
   schedules?: ScheduleService;
+  budget?: BudgetService;
 }
 
 const TaskId = z.string().min(1).max(64);
@@ -45,7 +47,7 @@ async function parse<T extends z.ZodTypeAny>(schema: T, body: () => Promise<stri
  * schema trigger/constraint (SQLITE_CONSTRAINT_*). Anything else is a bug and is rethrown as a 500
  * whose message stays out of the response (Gemini, P3.3 audit: the old name/regex match did both wrong).
  */
-const REFUSALS = [BoardError, AuditGateError, ReviewError, MissionError, TemplateError, PlaybookError, ScheduleError] as const;
+const REFUSALS = [BoardError, AuditGateError, ReviewError, MissionError, TemplateError, PlaybookError, ScheduleError, BudgetError] as const;
 async function act<T>(fn: () => T | Promise<T>): Promise<T> {
   try {
     return await fn();
@@ -123,6 +125,10 @@ export function registerControls(o: ControlsOptions): void {
         plannerAgentId: z.string().min(1).max(64),
         reviewerAgentIds: z.array(z.string().min(1).max(64)).max(20).optional(),
         maxRounds: z.number().int().min(1).max(10).optional(),
+        // Optional spending limits: stop starting runs for this mission once it has used this much (see budget/).
+        // The bounds, and the words when they are broken, are the budget service's (one set of rules, one kind of answer).
+        budgetUsd: z.number().finite().nullable().optional(),
+        budgetTokens: z.number().finite().nullable().optional(),
       }),
       body,
     );
@@ -134,7 +140,24 @@ export function registerControls(o: ControlsOptions): void {
         if (!connected.includes(id)) throw new HttpError(409, `${id} is not a connected agent, so it cannot take part. Connected: ${connected.join(', ') || 'none'}.`);
       }
     }
-    return act(() => missions().create(human(principal), { title: b.title, brief: b.brief, plannerAgentId: b.plannerAgentId, ...(b.reviewerAgentIds ? { reviewerAgentIds: b.reviewerAgentIds } : {}), ...(b.maxRounds ? { maxRounds: b.maxRounds } : {}) }));
+    const limits = { maxCostUsd: b.budgetUsd ?? null, maxTokens: b.budgetTokens ?? null };
+    const limited = limits.maxCostUsd !== null || limits.maxTokens !== null;
+    if (limited && !o.budget) throw new HttpError(503, 'Spending limits are not enabled');
+    return act(() => {
+      if (limited) o.budget!.validate(limits); // before the mission exists: a bad limit must not leave an unlimited mission behind
+      const created = missions().create(human(principal), { title: b.title, brief: b.brief, plannerAgentId: b.plannerAgentId, ...(b.reviewerAgentIds ? { reviewerAgentIds: b.reviewerAgentIds } : {}), ...(b.maxRounds ? { maxRounds: b.maxRounds } : {}) });
+      if (limited) o.budget!.set(created.id, limits);
+      return { ...created, budget: limited ? o.budget!.status(created.id) : null };
+    });
+  });
+  // Set, raise, lower or remove (both null) a mission's limit. Raising it lets a stopped mission carry on.
+  o.server.route('POST', '/api/missions/budget', 'human', async ({ principal, body }) => {
+    const b = await parse(z.object({ missionId: MissionId, budgetUsd: z.number().finite().nullable().optional(), budgetTokens: z.number().finite().nullable().optional() }), body);
+    if (!o.budget) throw new HttpError(503, 'Spending limits are not enabled');
+    const status = await act(() => o.budget!.set(b.missionId, { maxCostUsd: b.budgetUsd ?? null, maxTokens: b.budgetTokens ?? null }));
+    const limit = status ? [status.maxCostUsd !== null ? `$${status.maxCostUsd}` : '', status.maxTokens !== null ? `${status.maxTokens.toLocaleString('en-US')} tokens` : ''].filter(Boolean).join(' and ') : '';
+    o.board.recordControl(human(principal), status ? `set the spending limit of mission ${b.missionId} to ${limit}` : `removed the spending limit of mission ${b.missionId}`);
+    return { budget: status };
   });
   o.server.route('POST', '/api/missions/approve', 'human', async ({ principal, body }) => {
     const b = await parse(z.object({ missionId: MissionId }), body);

@@ -3,7 +3,7 @@
 import { createHmac } from 'node:crypto';
 
 export interface WebhookPayload {
-  event: 'plan_ready' | 'question' | 'gave_up' | 'mission_done' | 'test';
+  event: 'plan_ready' | 'question' | 'gave_up' | 'mission_done' | 'budget_reached' | 'test';
   title: string;
   message: string;
   /** The cockpit's address on this computer (no login in it). */

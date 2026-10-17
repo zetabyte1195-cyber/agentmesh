@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { distance, headline, nextSchedule, noticeAction, spendTotals, subline, taskSegments } from './home';
+import { distance, firstSteps, headline, nextSchedule, noticeAction, spendTotals, subline, taskSegments } from './home';
 import type { Notice, ScheduleItem } from './types';
 
 const notice = (kind: Notice['kind'], urgent = true): Notice => ({ key: `${kind}-${Math.random()}`, kind, urgent, title: 't', text: 'x' });
@@ -23,6 +23,7 @@ describe('the headline says what is going on in plain words', () => {
   it('the line under it counts agents and missions', () => {
     expect(subline([agent('BUSY'), agent('IDLE'), agent('IDLE', 'HUMAN')], [{ status: 'IMPLEMENTING' }, { status: 'DONE' }])).toBe('1 of 2 agents working, 1 mission in progress');
     expect(subline([agent('IDLE')], [])).toBe('0 of 1 agent working, no mission in progress');
+    expect(subline([agent('IDLE', 'HUMAN')], [])).toBe('No agent is connected, no mission in progress');
   });
 });
 
@@ -34,10 +35,11 @@ describe('numbers for the tiles', () => {
   });
   it('adds up usage, and says nothing about cost that no tool reported', () => {
     const u = (costUsd: number | null, i: number, o: number, unreported = 0, runs = 1, cache = 0) => ({ runs, unreported, inputTokens: i, outputTokens: o, cacheReadTokens: cache, costUsd });
-    expect(spendTotals([u(0.5, 100, 20), u(null, 300, 40, 2, 3)])).toEqual({ costUsd: 0.5, tokens: 460, unreportedRuns: 2, runs: 4 });
+    expect(spendTotals([u(0.5, 100, 20), u(null, 300, 40, 2, 3)])).toEqual({ costUsd: 0.5, tokens: 460, cachedTokens: 0, unreportedRuns: 2, runs: 4 });
     expect(spendTotals([u(null, 10, 10)]).costUsd).toBeNull();
-    expect(spendTotals([u(1, 100, 20, 0, 1, 500)]).tokens).toBe(620); // cache reads count, as in the per-agent line
-    expect(spendTotals([])).toEqual({ costUsd: null, tokens: 0, unreportedRuns: 0, runs: 0 });
+    // cached input is kept apart: it is cheap, and a mission's token limit does not count it either
+    expect(spendTotals([u(1, 100, 20, 0, 1, 500)])).toMatchObject({ tokens: 120, cachedTokens: 500 });
+    expect(spendTotals([])).toEqual({ costUsd: null, tokens: 0, cachedTokens: 0, unreportedRuns: 0, runs: 0 });
   });
   it('finds the schedule that fires next, ignoring those switched off', () => {
     const s = (id: string, nextRunAt: string | null, enabled = true) => ({ id, enabled, nextRunAt }) as ScheduleItem;
@@ -55,10 +57,25 @@ describe('numbers for the tiles', () => {
 });
 
 describe('what each item offers to do', () => {
-  it('names the action by what happens, and points to where it is done', () => {
+  it('names the action by what happens, points to where it is done, and says which mission to land on', () => {
+    const withMission = (n: Notice): Notice => ({ ...n, missionId: 'M7' });
+    expect(noticeAction(withMission(notice('plan')))).toEqual({ label: 'Read the plan', view: 'missions', primary: true, focus: 'mission-M7' });
     expect(noticeAction(notice('plan'))).toEqual({ label: 'Read the plan', view: 'missions', primary: true });
     expect(noticeAction(notice('question'))).toEqual({ label: 'Answer', view: 'board', primary: true });
-    expect(noticeAction(notice('stuck'))).toEqual({ label: 'See why', view: 'board', primary: true });
-    expect(noticeAction(notice('done', false))).toEqual({ label: 'Open', view: 'missions', primary: false });
+    expect(noticeAction(notice('stuck'))).toEqual({ label: 'See why', view: 'board', primary: false });
+    expect(noticeAction(withMission(notice('done', false)))).toEqual({ label: 'Open', view: 'missions', primary: false, focus: 'mission-M7' });
+    expect(noticeAction(withMission(notice('budget')))).toEqual({ label: 'Raise the limit', view: 'missions', primary: true, focus: 'mission-M7' });
+  });
+});
+
+describe('the first steps in a new project', () => {
+  it('lists three steps in order and marks the ones already done', () => {
+    const steps = firstSteps({ workers: 0, landing: false, missions: 0 })!;
+    expect(steps.map((x) => [x.id, x.done])).toEqual([['connect', false], ['check', false], ['mission', false]]);
+    expect(firstSteps({ workers: 2, landing: true, missions: 0 })!.map((x) => x.done)).toEqual([true, true, false]);
+    expect(firstSteps({ workers: 1, landing: false, missions: 0 })!.map((x) => x.done)).toEqual([true, false, false]);
+  });
+  it('is gone as soon as there is a mission, so it never nags', () => {
+    expect(firstSteps({ workers: 0, landing: false, missions: 1 })).toBeNull();
   });
 });

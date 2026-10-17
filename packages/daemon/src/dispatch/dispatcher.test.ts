@@ -244,6 +244,19 @@ describe('Dispatcher', () => {
     expect(d.nextWork(AGENTS()[2]!)).toBeNull(); // B still blocked on A
   });
 
+  it('a task that builds on another waits until it has landed on trunk, not only passed its audit', () => {
+    task('A', { suggested: 'claude-1', author: 'claude-1', status: 'READY_FOR_REVIEW' });
+    task('B', { suggested: 'gemini-1', prereqs: ['A'] });
+    const d = dispatcher();
+    const gemini = AGENTS()[2]!;
+    // A is audited and PASSED, but not yet on trunk: B's workspace would not have A's files.
+    db.prepare("INSERT INTO audits (id, task_id, auditor_agent_id, verdict, diff_hash, test_run_success, notes) VALUES ('a1', 'A', 'gemini-1', 'PASSED', 'h', 1, 'ok')").run();
+    expect((db.prepare("SELECT status FROM tasks WHERE id = 'A'").get() as { status: string }).status).toBe('PASSED');
+    expect(d.nextWork(gemini)).toBeNull();
+    db.prepare("UPDATE tasks SET status = 'COMMITTED' WHERE id = 'A'").run();
+    expect(d.nextWork(gemini)).toMatchObject({ kind: 'TASK', taskId: 'B' });
+  });
+
   it('dispatches an agent to read handoffs addressed to it', () => {
     task('T1');
     db.prepare("INSERT INTO handoffs (id, task_id, from_agent_id, to_agent_id, message) VALUES ('h1', 'T1', 'gemini-1', 'claude-1', 'please look')").run();

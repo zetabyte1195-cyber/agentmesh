@@ -17,10 +17,10 @@ git clone https://github.com/zetabyte1195-cyber/agentmesh.git
 cd agentmesh
 npm ci
 npm run build
-npm run check       # lint, then the whole test suite
+npm run check       # lint, the cockpit's type check, then the whole test suite
 ```
 
-Linux may need `npm ci --ignore-scripts` if it cannot compile the database engine.
+If `npm ci` fails while compiling the database engine (no C compiler installed), use `npm ci --ignore-scripts`: the engine ships ready-made binaries. CI installs it that way.
 
 To try your build in a project of your own, run `node packages/cli/dist/index.js start` from that project (after `npm run build`).
 
@@ -39,7 +39,7 @@ Most folders under `packages/daemon/src` are one part with an `index.ts` that li
 
 ## What a good change looks like
 
-- **It has a test,** and the whole suite passes: `npm run check`. Tests that need a real container engine run only with `AGENTMESH_DOCKER_TESTS=1`.
+- **It has a test,** and the whole suite passes: `npm run check`. A change to the cockpit is tested by rendering the component (see `packages/dashboard/src/*.test.ts`; `testing.ts` has a stand-in daemon). Tests that need a real container engine run only with `AGENTMESH_DOCKER_TESTS=1`.
 - **It works on Windows.** AgentMesh is developed on Windows, and Windows paths, quoting and processes are the usual cause of surprises. Avoid shell-only tricks; prefer Node's own APIs.
 - **It says what it checked.** Do not call something verified unless you ran it against the real thing. If you could not, say so in the change and in the text a user sees.
 - **The words are plain.** Cockpit text is for someone who is not a programmer: short sentences, sentence case, what happened and what to do about it. Name an action the same way everywhere.

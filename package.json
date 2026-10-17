@@ -14,7 +14,7 @@
     "clean": "tsc -b --clean",
     "test": "tsc -b && vitest run",
     "lint": "eslint .",
-    "check": "npm run lint && npm test"
+    "check": "npm run lint && npm run check -w @agentmesh/dashboard && npm test"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

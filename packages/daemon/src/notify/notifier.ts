@@ -6,6 +6,7 @@
 // turning notifications on must not fire a burst about old things.
 import type { SqliteDatabase } from '../db/index.js';
 import type { Dispatcher } from '../dispatch/index.js';
+import type { BudgetService } from '../budget/index.js';
 import type { MissionService } from '../missions/index.js';
 import { type Notice, collectNotices } from './notices.js';
 import { type DeliveryResult, type WebhookPayload, buildPayload, deliverOnce, parseWebhookUrl } from './webhook.js';
@@ -14,6 +15,7 @@ export interface NotifierOptions {
   db: SqliteDatabase;
   missions?: MissionService;
   dispatcher?: Dispatcher;
+  budget?: BudgetService;
   /** Read at every scan: the Human can change it in the cockpit while AgentMesh runs. */
   config: () => { webhookUrl?: string; webhookSecret?: string } | undefined;
   /** The cockpit's address to put in messages. */
@@ -31,7 +33,7 @@ export interface LastDelivery {
   error?: string;
 }
 
-const EVENT_OF: Record<Notice['kind'], WebhookPayload['event']> = { plan: 'plan_ready', question: 'question', stuck: 'gave_up', done: 'mission_done' };
+const EVENT_OF: Record<Notice['kind'], WebhookPayload['event']> = { plan: 'plan_ready', question: 'question', stuck: 'gave_up', done: 'mission_done', budget: 'budget_reached' };
 const GIVE_UP_AFTER = 8;
 
 export class Notifier {
@@ -90,7 +92,7 @@ export class Notifier {
     }
     this.scanning = true;
     try {
-      const notices = collectNotices({ db: this.db, ...(this.options.missions ? { missions: this.options.missions } : {}), ...(this.options.dispatcher ? { dispatcher: this.options.dispatcher } : {}), now: this.options.now ?? (() => new Date()) });
+      const notices = collectNotices({ db: this.db, ...(this.options.missions ? { missions: this.options.missions } : {}), ...(this.options.dispatcher ? { dispatcher: this.options.dispatcher } : {}), ...(this.options.budget ? { budget: this.options.budget } : {}), now: this.options.now ?? (() => new Date()) });
       const live = new Set(notices.map((n) => `notified:${n.key}`));
 
       if (!this.has('notify:armed')) {

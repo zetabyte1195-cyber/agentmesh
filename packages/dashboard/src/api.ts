@@ -36,10 +36,15 @@ export type UsageTotals = { runs: number; unreported: number; inputTokens: numbe
 
 const tokens = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
-/** "12 runs · 1.2M in / 40.1k out · $3.10", saying so when some runs reported nothing. */
+/**
+ * "12 runs · 120k in / 40.1k out · 1.1M read from cache · $3.10", saying so when some runs reported nothing. Tokens are
+ * the new input and the output, the same as a mission's token limit counts; input read again from the tool's cache is
+ * shown apart, because it is cheap and would swamp the rest (a run reads it again on every step).
+ */
 export function formatUsage(u: UsageTotals): string {
   const parts = [`${u.runs} run${u.runs === 1 ? '' : 's'}`];
-  if (u.inputTokens || u.outputTokens) parts.push(`${tokens(u.inputTokens + u.cacheReadTokens)} in / ${tokens(u.outputTokens)} out`);
+  if (u.inputTokens || u.outputTokens) parts.push(`${tokens(u.inputTokens)} in / ${tokens(u.outputTokens)} out`);
+  if (u.cacheReadTokens) parts.push(`${tokens(u.cacheReadTokens)} read from cache`);
   if (u.costUsd !== null) parts.push(`$${u.costUsd.toFixed(2)}`);
   if (u.unreported) parts.push(`${u.unreported} not reported`);
   return parts.join(' · ');

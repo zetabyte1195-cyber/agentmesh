@@ -10,7 +10,7 @@
     projectName,
     agentCount,
     version,
-    live,
+    link,
     paused,
     onTogglePause,
     theme,
@@ -20,7 +20,8 @@
     projectName: string;
     agentCount: number;
     version: string | null;
-    live: boolean;
+    /** The live connection to the daemon: not yet opened, open, or lost after having been open. */
+    link: 'connecting' | 'live' | 'lost';
     paused: boolean | null;
     onTogglePause: () => void;
     theme: ThemeChoice;
@@ -67,7 +68,7 @@
     </div>
     <div class={cell}>
       <div class={label}>Connection</div>
-      <div class="flex items-center gap-1.5"><span class={['size-2 rounded-full', live ? 'bg-green-600 dark:bg-green-400' : 'bg-red-600 dark:bg-red-400']}></span>{live ? 'Live' : 'Offline'}</div>
+      <div class="flex items-center gap-1.5"><span class={['size-2 rounded-full', link === 'live' ? 'bg-green-600 dark:bg-green-400' : link === 'lost' ? 'bg-red-600 dark:bg-red-400' : 'bg-stone-400']}></span>{link === 'live' ? 'Live' : link === 'lost' ? 'Offline' : 'Connecting…'}</div>
     </div>
   </div>
   <div class={cell}>

@@ -10,9 +10,9 @@
 //   • tokens are per-run, 256-bit, revoked when the run ends and again when AgentMesh restarts
 // A container that has its own run's token can use that agent's tools, as intended, and nothing more.
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { AuthError, type IdentityService, ImpersonationError, type Principal } from '../identity/index.js';
 import { extractBearer } from '../identity/tokens.js';
+import { listenFree } from '../server/ports.js';
 
 export interface AgentListenerOptions {
   identity: IdentityService;
@@ -36,11 +36,8 @@ export class AgentListener {
   }
 
   async listen(): Promise<{ host: string; port: number }> {
-    await new Promise<void>((resolve, reject) => {
-      this.http.once('error', reject);
-      this.http.listen(this.o.port, this.o.host, () => resolve());
-    });
-    this.boundPort = (this.http.address() as AddressInfo).port;
+    // A container's client refuses the same ports a browser does, so a port chosen by the system is never one of them.
+    this.boundPort = await listenFree(this.http, this.o.host, this.o.port);
     return { host: this.o.host, port: this.boundPort };
   }
 

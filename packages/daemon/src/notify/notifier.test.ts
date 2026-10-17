@@ -5,9 +5,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { listenFree } from '../server/ports.js';
+import { BUDGET_MIGRATION, BudgetService } from '../budget/index.js';
 import { MIGRATIONS, closeDatabase, migrate, openDatabase } from '../db/index.js';
 import type { SqliteDatabase } from '../db/index.js';
-import { DISPATCH_MIGRATION, USAGE_MIGRATION } from '../dispatch/index.js';
+import { DISPATCH_MIGRATION, USAGE_MIGRATION, type Dispatcher } from '../dispatch/index.js';
 import { IDENTITY_MIGRATION, IdentityService } from '../identity/index.js';
 import { MISSION_MIGRATION } from '../missions/index.js';
 import { collectNotices } from './notices.js';
@@ -30,7 +32,7 @@ const notifier = () => new Notifier({ db, config: () => cfg, cockpitUrl: () => '
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'agentmesh-notify-'));
   db = openDatabase(join(dir, 'mesh.db'));
-  migrate(db, [...MIGRATIONS, IDENTITY_MIGRATION, DISPATCH_MIGRATION, MISSION_MIGRATION, USAGE_MIGRATION]);
+  migrate(db, [...MIGRATIONS, IDENTITY_MIGRATION, DISPATCH_MIGRATION, MISSION_MIGRATION, USAGE_MIGRATION, BUDGET_MIGRATION]);
   new IdentityService(db).registerAgent({ id: 'claude-1', name: 'Claude', platform: 'CLAUDE_CODE', paradigm: 'CLI' });
   clock = new Date('2026-10-14T10:00:00Z');
   hits = [];
@@ -44,7 +46,7 @@ beforeEach(async () => {
       res.end('ok');
     });
   });
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  await listenFree(server, '127.0.0.1');
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/hook`;
   cfg = { webhookUrl: url, webhookSecret: 's3cret' };
 });
@@ -180,11 +182,41 @@ describe('Notifier', () => {
   });
 });
 
+describe('a mission that stopped at its spending limit', () => {
+  it('is announced once, as budget_reached, with the reason, and not again until a new limit is reached', async () => {
+    const budget = new BudgetService(db);
+    const n = new Notifier({ db, budget, config: () => cfg, cockpitUrl: () => 'http://127.0.0.1:8934', now: () => clock, retryDelayMs: () => 1000 });
+    await n.scan(); // the first scan only learns what is already waiting
+    db.prepare("INSERT INTO missions (id, title, brief, status, planner_agent_id, reviewer_agent_ids, round) VALUES ('M1', 'Car wash', 'a brief long enough', 'IMPLEMENTING', 'claude-1', '[]', 1)").run();
+    budget.set('M1', { maxCostUsd: 1 });
+    expect(await n.scan()).toBe(0); // within its limit: nothing to say
+    db.prepare("INSERT INTO dispatch_runs (id, agent_id, task_id, kind, status, started_at, ended_at) VALUES ('r1', 'claude-1', 'mission:M1', 'PLAN', 'SUCCEEDED', '2020-01-01 00:00:00', '2020-01-01 00:05:00')").run();
+    db.prepare("INSERT INTO run_usage (run_id, input_tokens, output_tokens, cache_read_tokens, cost_usd) VALUES ('r1', 1, 1, 0, 1.5)").run();
+    expect(await n.scan()).toBe(1);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.headers['x-agentmesh-event']).toBe('budget_reached');
+    const payload = JSON.parse(hits[0]!.body) as { title: string; message: string };
+    expect(payload.title).toBe('Spending limit reached: M1');
+    expect(payload.message).toContain('It has used $1.50 of its $1.00 limit.');
+    expect(await n.scan()).toBe(0); // said once
+    budget.set('M1', { maxCostUsd: 1.2 });
+    expect(await n.scan()).toBe(1); // a new, lower limit that is also passed is news again
+  });
+});
+
 describe('the "needs you" list', () => {
   it('lists open questions for the Human, and nothing for questions to agents', () => {
     ask('q1');
     db.prepare("INSERT INTO questions (id, from_agent_id, to_role, text) VALUES ('q2', 'claude-1', 'Agent', 'internal')").run();
     const list = collectNotices({ db });
     expect(list.map((x) => [x.key, x.kind, x.urgent])).toEqual([['q:q1', 'question', true]]);
+  });
+
+  it('carries what the cockpit needs to act on a notice in place', () => {
+    ask('q1');
+    const dispatcher = { stuck: () => [{ agentId: 'gemini-1', subject: 'M0-2', tries: 3, lastStatus: 'FAILED', lastDetail: 'quota', lastEnded: '2026-10-15 10:00:00' }] } as unknown as Dispatcher;
+    const list = collectNotices({ db, dispatcher });
+    expect(list.find((x) => x.kind === 'question')).toMatchObject({ questionId: 'q1' });
+    expect(list.find((x) => x.kind === 'stuck')).toMatchObject({ agentId: 'gemini-1', subject: 'M0-2' });
   });
 });

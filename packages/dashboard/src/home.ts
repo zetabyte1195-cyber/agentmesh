@@ -33,7 +33,7 @@ export function subline(agents: readonly { status: string; platform: string }[],
   const workers = agents.filter((a) => a.platform !== 'HUMAN');
   const busy = workers.filter((a) => a.status === 'BUSY').length;
   const active = missions.filter((m) => ACTIVE.has(m.status)).length;
-  const parts = [`${busy} of ${workers.length} agent${workers.length === 1 ? '' : 's'} working`];
+  const parts = [workers.length ? `${busy} of ${workers.length} agent${workers.length === 1 ? '' : 's'} working` : 'No agent is connected'];
   parts.push(active ? `${active} mission${active === 1 ? '' : 's'} in progress` : 'no mission in progress');
   return parts.join(', ');
 }
@@ -59,10 +59,11 @@ export function taskSegments(tasks: readonly { status: string }[]): Segments {
 }
 
 /** What has been used so far, across agents. Cost is only the part the tools reported. */
-export function spendTotals(byAgent: readonly UsageTotals[]): { costUsd: number | null; tokens: number; unreportedRuns: number; runs: number } {
+export function spendTotals(byAgent: readonly UsageTotals[]): { costUsd: number | null; tokens: number; cachedTokens: number; unreportedRuns: number; runs: number } {
   let cost = 0;
   let any = false;
   let tokens = 0;
+  let cached = 0;
   let unreported = 0;
   let runs = 0;
   for (const u of byAgent) {
@@ -70,11 +71,12 @@ export function spendTotals(byAgent: readonly UsageTotals[]): { costUsd: number 
       cost += u.costUsd;
       any = true;
     }
-    tokens += u.inputTokens + u.cacheReadTokens + u.outputTokens; // same rule as the per-agent line: cache reads count as input
+    tokens += u.inputTokens + u.outputTokens; // what a mission's token limit counts; cached input is kept apart
+    cached += u.cacheReadTokens;
     unreported += u.unreported;
     runs += u.runs;
   }
-  return { costUsd: any ? cost : null, tokens, unreportedRuns: unreported, runs };
+  return { costUsd: any ? cost : null, tokens, cachedTokens: cached, unreportedRuns: unreported, runs };
 }
 
 export const compactNumber = (n: number): string => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n));
@@ -98,10 +100,35 @@ export function distance(fromMs: number, toMs: number): string {
   return `in ${d} days`;
 }
 
-/** What each notice offers the person to do, and where it lives. */
-export function noticeAction(n: Notice): { label: string; view: 'missions' | 'board'; primary: boolean } {
-  if (n.kind === 'plan') return { label: 'Read the plan', view: 'missions', primary: true };
+/** What each notice offers the person to do, where it lives, and which element to land on. */
+export function noticeAction(n: Notice): { label: string; view: 'missions' | 'board'; primary: boolean; focus?: string } {
+  const mission = n.missionId ? { focus: `mission-${n.missionId}` } : {};
+  if (n.kind === 'plan') return { label: 'Read the plan', view: 'missions', primary: true, ...mission };
   if (n.kind === 'question') return { label: 'Answer', view: 'board', primary: true };
-  if (n.kind === 'stuck') return { label: 'See why', view: 'board', primary: true };
-  return { label: 'Open', view: 'missions', primary: false };
+  if (n.kind === 'stuck') return { label: 'See why', view: 'board', primary: false };
+  if (n.kind === 'budget') return { label: 'Raise the limit', view: 'missions', primary: true, ...mission };
+  return { label: 'Open', view: 'missions', primary: false, ...mission };
+}
+
+export interface FirstStep {
+  id: 'connect' | 'check' | 'mission';
+  text: string;
+  done: boolean;
+  /** Where the step is done. */
+  view: 'setup' | 'missions';
+  action: string;
+}
+
+/**
+ * The first three things to do in a new project, in order. Null once a mission exists: the person has found their
+ * way, so it never nags.
+ */
+export function firstSteps(input: { workers: number; landing: boolean; missions: number }): FirstStep[] | null {
+  if (input.missions > 0) return null;
+  const steps: FirstStep[] = [
+    { id: 'connect', text: 'Connect an agent', done: input.workers > 0, view: 'setup', action: 'Open Setup' },
+    { id: 'check', text: 'Say how your project is checked', done: input.landing, view: 'setup', action: 'Open Setup' },
+    { id: 'mission', text: 'Describe what you want built', done: false, view: 'missions', action: 'Start a mission' },
+  ];
+  return steps;
 }

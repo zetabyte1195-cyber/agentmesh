@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import type { AgentCommand } from '../runner/commands.js';
-import { parseAgyEvent, parseClaudeEvent } from '../runner/events.js';
+import { type RunnerEvent, parseAgyEvent, parseClaudeEvent } from '../runner/events.js';
 import { probeVersion, resolveExecutable } from './resolve.js';
 import type { LaunchSpec, PlatformAdapter } from './types.js';
 
@@ -29,6 +29,10 @@ export const CustomPlatformSchema = z
     output: z.enum(['text', 'claude-stream-json', 'agy-stream-json']).default('text'),
     versionArgs: z.array(z.string().max(200)).max(10).default(['--version']),
     env: z.record(z.string(), z.string().max(2000)).optional(),
+    // Set to false for a tool whose printed cost is not real money. Claude Code prices every run as if it were Claude, so
+    // pointed at a local model (Ollama) it reports dollars nobody paid. The cost is then dropped (tokens are kept), so it
+    // never counts toward a mission's dollar limit or the cockpit's totals.
+    reportsCost: z.boolean().optional(),
   })
   .strict()
   .refine((p) => p.args.some((a) => a.includes('{prompt}')), { message: 'args must contain {prompt} (where the instruction goes)', path: ['args'] })
@@ -42,7 +46,8 @@ const fill = (template: string, values: Record<string, string>): string => templ
 
 export function customAdapter(input: CustomPlatformConfig): PlatformAdapter {
   const config = CustomPlatformSchema.parse(input);
-  const parse = config.output === 'claude-stream-json' ? parseClaudeEvent : config.output === 'agy-stream-json' ? parseAgyEvent : () => [];
+  const parseOutput = config.output === 'claude-stream-json' ? parseClaudeEvent : config.output === 'agy-stream-json' ? parseAgyEvent : () => [];
+  const parse = config.reportsCost === false ? (e: Record<string, unknown>): RunnerEvent[] => parseOutput(e).map((ev) => (ev.kind === 'result' ? { ...ev, costUsd: null } : ev)) : parseOutput;
   return {
     id: config.id,
     label: config.label,
@@ -61,7 +66,11 @@ export function customAdapter(input: CustomPlatformConfig): PlatformAdapter {
       if (spec.run.toolConfigs) {
         values['mcpConfigFile:opencode'] = spec.run.toolConfigs.opencode;
         values['mcpConfigFile:gemini'] = spec.run.toolConfigs.gemini;
-        values['mcpConfigJson:opencode'] = readFileSync(spec.run.toolConfigs.opencode, 'utf8');
+      }
+      // Only a tool that asks for the inline text gets it. The file is read on this computer; inside a container its path is the
+      // container's, so the text the run folder was made with is used instead.
+      if (spec.run.toolConfigs && [...config.args, ...Object.values(config.env ?? {})].some((t) => t.includes('{mcpConfigJson:opencode}'))) {
+        values['mcpConfigJson:opencode'] = spec.run.opencodeConfigJson ?? readFileSync(spec.run.toolConfigs.opencode, 'utf8');
       }
       const env: Record<string, string> = { AGENTMESH_MCP_URL: spec.run.mcpUrl };
       for (const [k, v] of Object.entries(config.env ?? {})) env[k] = fill(v, values);
