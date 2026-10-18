@@ -12,7 +12,7 @@ export default defineConfig({
     projects: [
       {
         extends: true,
-        test: { name: 'daemon', environment: 'node', include: ['packages/{core,daemon,cli}/src/**/*.test.ts'] },
+        test: { name: 'daemon', environment: 'node', include: ['packages/{core,daemon,cli}/src/**/*.test.ts'], setupFiles: ['packages/daemon/test/real-tmpdir.ts'] },
       },
       {
         // The cockpit: its logic and its Svelte components, rendered in a simulated browser.
