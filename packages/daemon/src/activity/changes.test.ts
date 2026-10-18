@@ -7,6 +7,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { changedFiles, trustedWorkspace } from './changes.js';
 
 let repo: string;
+/** Windows keeps a folder locked for a moment after git has been run in it; a leftover temp folder must never fail a test. */
+function removeQuietly(path: string): void {
+  try {
+    rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch {
+    // left for the system to clean up
+  }
+}
 const g = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' }).trim();
 const put = (rel: string, text: string) => {
   mkdirSync(join(repo, rel, '..'), { recursive: true });
@@ -25,7 +33,7 @@ beforeEach(() => {
   g('commit', '-q', '-m', 'base');
   g('checkout', '-q', '-b', 'mesh/t1');
 });
-afterEach(() => rmSync(repo, { recursive: true, force: true, maxRetries: 5 }));
+afterEach(() => removeQuietly(repo));
 
 describe('what a workspace changed', () => {
   it('nothing, when nothing was', async () => {
@@ -83,7 +91,7 @@ describe('what a workspace changed', () => {
     try {
       await expect(changedFiles(plain, 'main')).resolves.toEqual({ files: [], truncated: false });
     } finally {
-      rmSync(plain, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
+      removeQuietly(plain);
     }
   });
 });
@@ -143,7 +151,7 @@ describe('which workspaces git is run in', () => {
       expect(trustedWorkspace(join(repo, 'no-such-folder'), root())).toBe(false);
       expect(trustedWorkspace(wt)).toBe(true); // with no project given there is nothing to compare with
     } finally {
-      rmSync(other, { recursive: true, force: true, maxRetries: 5 });
+      removeQuietly(other);
     }
   });
 
@@ -174,7 +182,7 @@ describe('which workspaces git is run in', () => {
       expect(await changedFiles(wt, 'main', { projectRoot: root() })).toEqual({ files: [], truncated: false });
       expect(existsSync(marker)).toBe(false);
     } finally {
-      rmSync(evil, { recursive: true, force: true, maxRetries: 5 });
+      removeQuietly(evil);
     }
   });
 });
