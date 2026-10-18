@@ -7,7 +7,7 @@
   import AgentCard, { type AgentInfo } from './AgentCard.svelte';
   import { compactNumber, distance, firstSteps, headline, nextSchedule, spendTotals, subline, taskSegments } from './home';
   import NoticeCard from './NoticeCard.svelte';
-  import type { Notice, Run, SchedulesState } from './types';
+  import type { LiveRun, Notice, Run, SchedulesState } from './types';
   import type { View } from './views';
 
   type HomeMission = { id: string; title: string; status: string; waitingOn: string[]; progress: { total: number; committed: number }; budget?: { reached: string | null } | null };
@@ -24,6 +24,7 @@
     backoffs,
     paused,
     landing,
+    live = {},
     onNavigate,
     onStop,
     onChanged,
@@ -41,6 +42,8 @@
     paused: boolean;
     /** Whether the project's check is set up (so finished work can be merged). */
     landing: boolean;
+    /** What each agent that is working is doing right now. */
+    live?: Record<string, LiveRun>;
     onNavigate: (v: View, focus?: string) => void;
     onStop: (agentId: string) => void;
     onChanged: () => void;
@@ -152,7 +155,7 @@
     {#if workers.length}
       <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {#each workers as agent (agent.id)}
-          <AgentCard {agent} used={usedBy(agent.id)} {paused} unavailable={backoffs.find((b) => b.platform === agent.platform)} {onStop} />
+          <AgentCard {agent} used={usedBy(agent.id)} {paused} unavailable={backoffs.find((b) => b.platform === agent.platform)} activity={live[agent.id]?.entries ?? []} {onStop} />
         {/each}
       </div>
     {:else}

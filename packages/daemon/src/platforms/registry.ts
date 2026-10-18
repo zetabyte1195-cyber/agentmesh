@@ -22,11 +22,12 @@ export interface PlatformRegistry {
  * How an agent of this platform is started. The platform is looked up at every start, not once when the agent was connected,
  * so changing the platform's definition (the model of a recipe, say) reaches agents that are already connected.
  */
-export function launcher(registry: PlatformRegistry, platform: string, allowedTools?: readonly string[]) {
+export function launcher(registry: PlatformRegistry, platform: string, allowedTools?: readonly string[], settings?: () => { model?: string; subAgents?: boolean }) {
   return (prompt: string, cwd: string, run: PlatformRunContext): AgentCommand => {
     const adapter = registry.get(platform);
     if (!adapter) throw new Error(`The platform ${platform} is no longer defined.`);
-    return adapter.command({ prompt, cwd, run, ...(allowedTools ? { allowedTools } : {}) });
+    // The model and sub-agent choices are read now, at the start of the run, so a change applies from the next one.
+    return adapter.command({ prompt, cwd, run, ...(allowedTools ? { allowedTools } : {}), ...(settings?.() ?? {}) });
   };
 }
 

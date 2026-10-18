@@ -12,7 +12,7 @@ import type { IdentityService, Principal } from '../identity/index.js';
 import { agentIdFor } from '../init/agents.js';
 import { detectProject } from '../init/detect.js';
 import { type ProjectConfig, initProject } from '../init/init.js';
-import { type PlatformRegistry, RECIPES, RecipeError, ensureAgyMcpRule, isThisComputer, launcher, recipeById, recipeConfig, usableAddress } from '../platforms/index.js';
+import { type PlatformRegistry, RECIPES, RecipeError, agentSettingsOf, checkAgentSettings, ensureAgyMcpRule, isThisComputer, launcher, listModels, recipeById, recipeConfig, usableAddress } from '../platforms/index.js';
 import { type DaemonServer, HttpError } from '../server/index.js';
 import type { UpdateChecker } from '../update/index.js';
 
@@ -52,6 +52,8 @@ export function setupState(o: Pick<SetupOptions, 'config' | 'registry' | 'root' 
       },
       // Ready-made definitions for other tools; every one is added as "not verified".
       recipes: RECIPES.map((r) => ({ id: r.id, title: r.title, summary: r.summary, caveats: r.caveats, install: r.install, signIn: r.signIn, docs: r.docs, fields: (r.fields ?? []).map((f) => ({ id: f.id, label: f.label, hint: f.hint, default: f.default, suggest: f.suggest ?? null })), added: o.registry.has(r.id), current: o.registry.has(r.id) && r.current ? r.current(o.config.customPlatforms?.find((c) => c.id === r.id) ?? r.config) : null })),
+      // What can be chosen for each agent: its model, and (Claude Code) sub-agents.
+      agentSettings: o.config.agents.map((a) => ({ id: a.id, platform: a.platform, model: a.model ?? null, subAgents: Boolean(a.subAgents), canChooseModel: a.platform === 'CLAUDE_CODE' || a.platform === 'ANTIGRAVITY', canUseSubAgents: a.platform === 'CLAUDE_CODE' })),
       // The secret is never sent back to the page: only whether one is set.
       notifications: { webhookUrl: o.config.notifications?.webhookUrl ?? null, hasSecret: Boolean(o.config.notifications?.webhookSecret), last: o.notifier?.last() ?? null },
       update: { enabled: Boolean(o.config.updateCheck), info: o.updates?.info() ?? null, error: o.updates?.error() ?? null },
@@ -308,6 +310,59 @@ export function registerSetup(o: SetupOptions): void {
     return { checked: true, reachable: true, models };
   });
 
+  // The models to offer for a platform. Antigravity is asked (agy models) only when this is called, which is when the person opens the choice.
+  o.server.route('POST', '/api/models', 'human', async ({ body }) => {
+    let raw: unknown;
+    try {
+      raw = JSON.parse((await body()) || '{}');
+    } catch {
+      throw new HttpError(400, 'Body must be JSON');
+    }
+    const r = z.object({ platform: z.string().min(1).max(40) }).strict().safeParse(raw);
+    if (!r.success) throw new HttpError(400, 'platform is required');
+    return listModels(r.data.platform);
+  });
+
+  // The model an agent runs on and whether Claude Code may use sub-agents. Applies from the agent's next run; a run going now is not touched.
+  o.server.route('POST', '/api/agents/settings', 'human', async ({ principal, body }) => {
+    let raw: unknown;
+    try {
+      raw = JSON.parse((await body()) || '{}');
+    } catch {
+      throw new HttpError(400, 'Body must be JSON');
+    }
+    const r = z.object({ agentId: AgentId, model: z.string().max(200).nullable().optional(), subAgents: z.boolean().optional() }).strict().safeParse(raw);
+    if (!r.success) throw new HttpError(400, r.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; '));
+    const agent = o.config.agents.find((a) => a.id === r.data.agentId);
+    if (!agent) throw new HttpError(404, `Unknown agent ${r.data.agentId}`);
+    const problem = checkAgentSettings(agent.platform, { model: r.data.model, subAgents: r.data.subAgents });
+    if (problem) throw new HttpError(409, problem);
+    const before = { model: agent.model, subAgents: agent.subAgents };
+    if (r.data.model !== undefined) {
+      const m = (r.data.model ?? '').trim();
+      if (m) agent.model = m;
+      else delete agent.model;
+    }
+    if (r.data.subAgents !== undefined) {
+      if (r.data.subAgents) agent.subAgents = true;
+      else delete agent.subAgents;
+    }
+    try {
+      saveConfig(o);
+    } catch (err) {
+      if (before.model === undefined) delete agent.model;
+      else agent.model = before.model;
+      if (before.subAgents === undefined) delete agent.subAgents;
+      else agent.subAgents = before.subAgents;
+      throw err;
+    }
+    const said: string[] = [];
+    if (r.data.model !== undefined) said.push(agent.model ? `set the model of ${agent.id} to ${agent.model}` : `put ${agent.id} back on its tool's default model`);
+    if (r.data.subAgents !== undefined) said.push(agent.subAgents ? `allowed sub-agents for ${agent.id}` : `stopped sub-agents for ${agent.id}`);
+    if (said.length) o.board.recordControl(human(principal), `${said.join('; ')} (from its next run)`);
+    return { id: agent.id, model: agent.model ?? null, subAgents: Boolean(agent.subAgents) };
+  });
+
   o.server.route('POST', '/api/agents', 'human', async ({ principal, body }) => {
     let raw: unknown;
     try {
@@ -334,7 +389,7 @@ export function registerSetup(o: SetupOptions): void {
       platform: adapter.id,
       rulebook: adapter.rulebook,
       ownerNames: [adapter.friendlyName],
-      command: launcher(o.registry, adapter.id, o.allowedTools),
+      command: launcher(o.registry, adapter.id, o.allowedTools, () => agentSettingsOf(o.config, id)),
     });
     // Every agent's rulebook mentions the others; rewrite them and commit so new workspaces have them.
     const warnings: string[] = [];

@@ -10,11 +10,13 @@ export interface RunUsage {
   cacheWriteTokens: number;
 }
 
+export type TargetKind = 'file' | 'command' | 'search' | 'note';
+
 export type RunnerEvent =
   | { kind: 'init'; sessionId: string | null; model: string | null }
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; /** Said by a sub-agent. */ sub?: boolean }
   /** `id` and `inputHash` (the input without its prose description) let a result be paired with its call. Claude only: agy gives null. */
-  | { kind: 'tool_use'; name: string; id?: string | null; inputHash?: string }
+  | { kind: 'tool_use'; name: string; id?: string | null; inputHash?: string; /** The file, command or search the tool was given (clipped), for the live feed. Never the tool's output. */ target?: string; targetKind?: TargetKind; /** Done by a sub-agent the agent started, not by the agent itself. */ sub?: boolean }
   /** A tool's result, paired by `id` with its tool_use (Claude stream-json; the wording was confirmed on a real run). */
   | { kind: 'tool_result'; id: string | null; isError: boolean; outputHash: string }
   | {
@@ -30,6 +32,29 @@ export type RunnerEvent =
   | { kind: 'other'; label: string };
 
 type Json = Record<string, unknown>;
+
+const MAX_TARGET = 200;
+const clip = (s: string): string => {
+  const one = s.replace(/\s+/g, ' ').trim();
+  return one.length > MAX_TARGET ? `${one.slice(0, MAX_TARGET - 1)}…` : one;
+};
+// Which parameter of a tool call names what it works on. Claude Code's tools use snake_case, Antigravity's CamelCase.
+const TARGET_KEYS: readonly [string, TargetKind][] = [
+  ['file_path', 'file'], ['notebook_path', 'file'], ['path', 'file'], ['TargetFile', 'file'], ['AbsolutePath', 'file'], ['FilePath', 'file'],
+  ['command', 'command'], ['CommandLine', 'command'],
+  ['pattern', 'search'], ['query', 'search'], ['Query', 'search'],
+  ['description', 'note'], // last: what a sub-agent was asked to do (a tool with something more exact is described by that)
+];
+/** What a tool call was aimed at, from its input. Nothing when it names nothing (or the input is not an object). */
+export function targetOf(input: unknown): { target: string; targetKind: TargetKind } | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const o = input as Json;
+  for (const [key, targetKind] of TARGET_KEYS) {
+    const v = o[key];
+    if (typeof v === 'string' && v.trim() !== '') return { target: clip(v), targetKind };
+  }
+  return undefined;
+}
 
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
@@ -47,8 +72,10 @@ export function parseClaudeEvent(e: Json): RunnerEvent[] {
       if (!Array.isArray(content)) return [];
       return content.flatMap((c): RunnerEvent[] => {
         const part = obj(c);
-        if (part.type === 'text' && typeof part.text === 'string') return [{ kind: 'text', text: part.text }];
-        if (part.type === 'tool_use') return [{ kind: 'tool_use', name: String(part.name), id: str(part.id), inputHash: inputSignature(part.input) }];
+        // A sub-agent's steps arrive in the same stream, tagged with the call that started it.
+        const sub = typeof e.parent_tool_use_id === 'string' && e.parent_tool_use_id !== '' ? { sub: true as const } : {};
+        if (part.type === 'text' && typeof part.text === 'string') return [{ kind: 'text', text: part.text, ...sub }];
+        if (part.type === 'tool_use') return [{ kind: 'tool_use', name: String(part.name), id: str(part.id), inputHash: inputSignature(part.input), ...targetOf(part.input), ...sub }];
         return [];
       });
     }
@@ -98,8 +125,17 @@ export function parseAgyEvent(e: Json): RunnerEvent[] {
       if (s.step_type === 'agent_response' && typeof s.text_delta === 'string' && s.text_delta !== '') {
         return [{ kind: 'text', text: s.text_delta }];
       }
-      // agy's tool-call step shape hasn't been captured yet (the probe made no tool calls), so
-      // non-text steps stay 'other' with their step_type rather than being guessed at.
+      // A tool step (recorded from a real run): ACTIVE when it starts, DONE when it ends, with tool_name and
+      // tool_info.parameters. It is reported once, when it starts. It has no id, so loop protection leaves it alone.
+      if (s.step_type === 'tool' && s.state === 'ACTIVE' && typeof s.tool_name === 'string') {
+        const params = obj(obj(s.tool_info).parameters);
+        // A call to an MCP server (AgentMesh's tools) goes through one generic tool; it is named as Claude Code names it.
+        const server = str(params.ServerName);
+        const tool = str(params.ToolName);
+        if (s.tool_name === 'call_mcp_tool' && server && tool && /^[\w.-]+$/.test(server) && /^[\w.-]+$/.test(tool)) return [{ kind: 'tool_use', name: `mcp__${server}__${tool}`, id: null }];
+        return [{ kind: 'tool_use', name: s.tool_name, id: null, ...targetOf(params) }];
+      }
+      // Anything else stays 'other' with its step_type rather than being guessed at.
       return [{ kind: 'other', label: `step/${String(s.step_type)}/${String(s.state)}` }];
     }
     case 'result': {

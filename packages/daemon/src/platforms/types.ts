@@ -25,6 +25,10 @@ export interface LaunchSpec {
   cwd: string;
   run: PlatformRunContext;
   allowedTools?: readonly string[];
+  /** The model the person chose for this agent (a built-in platform only; a tool defined by hand names its model in its arguments). */
+  model?: string;
+  /** Claude Code may start sub-agents (the person switched it on for this agent). */
+  subAgents?: boolean;
 }
 
 export interface Detection {

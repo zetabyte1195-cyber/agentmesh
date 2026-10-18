@@ -2,6 +2,26 @@
 
 What changed in each release, newest first. AgentMesh is young: until 1.0, any release may change how things look or are named, and the notes below say when something you rely on moved.
 
+## Unreleased
+
+### Added
+
+- **Watch the work as it happens.** An agent's card on Home, a task on the Board, and each run in **Runs** now show what the agent is doing: the files it reads, edits and writes, the commands it runs, what it says, and the AgentMesh steps it takes. It works for Claude Code and for Antigravity. Only the names of files and commands are kept (up to the last few hundred steps of the last runs, in memory until AgentMesh stops); what a tool returned, and what was written into a file, is never kept.
+- **The files a task changed, live.** On a task's panel: each file added, changed, deleted or renamed, with the lines added and removed, read from git while the agent works.
+- **A new Board.** Every stage as a column (Waiting, Being built, In review, Passed, Needs attention, Merged), a card per task with who has it, which mission it belongs to, what it is blocked by, and what its agent is doing right now. Filter by mission, agent or words, and hide what has merged. A task opens in a panel with what it has to do, the feed, the files and its locks.
+- **Open in editor.** A button on a task's panel opens its folder in VS Code (or the editor named in `AGENTMESH_EDITOR`). The folder holds what an agent wrote and nobody has reviewed: the panel says so, and a folder with editor settings the agent wrote (`.vscode`, `.idea`) is only opened after you say yes.
+- **Choose the model of each agent**, in **Setup**: Claude Code takes `sonnet`, `opus`, `haiku` or a full name, and Antigravity takes one of the models `agy models` lists for your account. Blank means the tool's own default. It applies from the agent's next run, and the first line of its feed says which model it really started on.
+- **Sub-agents for Claude Code**, switched on per agent in **Setup** (off by default). Claude Code may then start helper agents for parts of a task; they work in the same folder under the same rules and use tokens of their own. Their steps are marked as theirs in the feed. Antigravity decides for itself; AgentMesh does not switch it.
+
+### Changed
+
+- An agent whose run is going is shown as working, with a button to stop it, even during a planning step (it had no status of its own yet and showed as idle).
+- A cockpit left open while AgentMesh is restarted now shows the sign-in screen instead of trying to reconnect for ever, and catches up on what it missed when the connection comes back.
+
+### Fixed
+
+- Setting up a tool's model or options no longer needs the settings file edited by hand.
+
 ## 0.2.0 (2026-10-18)
 
 ### Added

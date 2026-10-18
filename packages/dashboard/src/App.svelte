@@ -3,7 +3,9 @@
   // WebSocket (no polling). Navigation is a sidebar; Home is the first screen, Board is the detailed view.
   import { type ComponentProps, onMount, tick } from 'svelte';
   import type { AgentInfo } from './AgentCard.svelte';
+  import { type ActivityState, applyChange, mergeEntries } from './activity';
   import { type UsageTotals } from './api';
+  import Board from './Board.svelte';
   import Controls from './Controls.svelte';
   import Home from './Home.svelte';
   import Missions from './Missions.svelte';
@@ -15,7 +17,7 @@
   import { setTheme, storedTheme, type ThemeChoice } from './theme';
   import Timeline from './Timeline.svelte';
   import TitleBlock from './TitleBlock.svelte';
-  import type { Notice, NotificationsState, PlaybooksState, RecipeInfo, Run, SandboxState, SchedulesState, UpdateState } from './types';
+  import type { ActivityChange, AgentSetting, BoardTask, LiveRun, Notice, NotificationsState, PlaybooksState, RecipeInfo, Run, SandboxState, SchedulesState, UpdateState } from './types';
   import type { View } from './views';
 
   let controlError = $state('');
@@ -27,27 +29,26 @@
     void load();
   }
 
-  type Task = { id: string; title: string; status: string; assigned_agent_id: string | null; suggested_owner: string | null };
   type Question = { id: string; text: string; from_agent_id: string; to_role: string; task_id: string | null };
   type MeshEvent = { id: string; taskId: string | null; agentId: string | null; kind: string; text: string; createdAt: string };
   type Snapshot = {
     missions: ComponentProps<typeof Missions>['missions'];
-    setup: { project: ComponentProps<typeof Setup>['project']; platforms: ComponentProps<typeof Setup>['platforms']; notifications: NotificationsState; update: UpdateState; recipes: RecipeInfo[] };
+    setup: { project: ComponentProps<typeof Setup>['project']; platforms: ComponentProps<typeof Setup>['platforms']; notifications: NotificationsState; update: UpdateState; recipes: RecipeInfo[]; agentSettings: AgentSetting[] };
     version: string | null;
     notices: Notice[];
     playbooks: PlaybooksState | null;
     schedules: SchedulesState | null;
     sandbox: SandboxState | null;
     agents: AgentInfo[];
-    tasks: Task[];
+    tasks: BoardTask[];
     openQuestions: Question[];
     events: MeshEvent[];
     leases: { id: string; taskId: string; agentId: string; path: string; type: string }[];
+    /** The run each working agent is on, with its latest steps. */
+    live: Record<string, LiveRun>;
     usage: { byAgent: ({ agentId: string } & UsageTotals)[]; byMission: ({ missionId: string } & UsageTotals)[] };
     dispatch: { paused: boolean; backoffs: { platform: string; until: string; reason: string }[]; stuck: NonNullable<ComponentProps<typeof Controls>['stuck']>; recentRuns: Run[] } | null;
   };
-
-  const COLUMNS = ['TODO', 'IN_PROGRESS', 'READY_FOR_REVIEW', 'AUDITING', 'PASSED', 'BLOCKED', 'REJECTED', 'COMMITTED'];
 
   let snapshot = $state<Snapshot | null>(null);
   let chosen = $state<View | null>(null);
@@ -65,7 +66,8 @@
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 
   const workers = $derived((snapshot?.agents ?? []).filter((a) => a.platform !== 'HUMAN'));
-  const byStatus = $derived(Object.fromEntries(COLUMNS.map((c) => [c, (snapshot?.tasks ?? []).filter((t) => t.status === c)])) as Record<string, Task[]>);
+  // What each agent is doing, kept up to date from what the daemon pushes. The snapshot says what is going on when the page loads.
+  let activity = $state<ActivityState>({ live: {}, byRun: {} });
 
   async function load(): Promise<void> {
     const res = await fetch('/api/state', { credentials: 'same-origin' });
@@ -74,6 +76,10 @@
       return;
     }
     snapshot = (await res.json()) as Snapshot;
+    const live = snapshot.live ?? {};
+    const byRun = { ...activity.byRun };
+    for (const l of Object.values(live)) byRun[l.runId] = mergeEntries(byRun[l.runId] ?? [], l.entries);
+    activity = { live, byRun };
     auth = 'ok';
     handleNotices();
   }
@@ -94,17 +100,34 @@
     refreshTimer = setTimeout(() => void load(), 150);
   }
 
+  // Reading the page again first catches up on what was missed, and finds out if the session ended (AgentMesh was restarted):
+  // then the sign-in screen is shown, instead of reconnecting for ever without being allowed in.
+  async function reconnect(): Promise<void> {
+    try {
+      await load();
+    } catch {
+      // AgentMesh is still not answering: try the live connection again anyway.
+    }
+    if (auth === 'ok') connect();
+  }
+
   function connect(): void {
     const ws = new WebSocket(`ws://${location.host}/ws/cockpit`);
     ws.onopen = () => (link = 'live');
     ws.onmessage = (m) => {
-      const msg = JSON.parse(String(m.data)) as { type: string; payload: MeshEvent };
+      const msg = JSON.parse(String(m.data)) as { type: string; payload: MeshEvent & ActivityChange };
+      if (msg.type === 'ACTIVITY') {
+        // A step is not a reason to load everything again; the end of a run is (the card and the board change).
+        activity = applyChange(activity, msg.payload);
+        if (!msg.payload.running) scheduleRefresh();
+        return;
+      }
       if (msg.type === 'EVENT' && snapshot) snapshot.events = [msg.payload, ...snapshot.events].slice(0, 200);
       scheduleRefresh();
     };
     ws.onclose = () => {
       link = 'lost';
-      if (auth === 'ok') setTimeout(connect, 2000);
+      if (auth === 'ok') setTimeout(() => void reconnect(), 2000);
     };
   }
 
@@ -194,6 +217,7 @@
             backoffs={snapshot.dispatch?.backoffs ?? []}
             paused={Boolean(snapshot.dispatch?.paused)}
             landing={snapshot.setup.project.landing}
+            live={activity.live}
             onNavigate={navigate}
             onStop={(agentId) => void control('/api/stop-run', { agentId })}
             onChanged={() => void load()}
@@ -201,43 +225,25 @@
         {:else if view === 'missions'}
           <Missions missions={snapshot.missions} agents={snapshot.agents} usage={snapshot.usage?.byMission ?? []} onChanged={() => void load()} />
         {:else if view === 'runs'}
-          <Runs runs={snapshot.dispatch?.recentRuns ?? []} />
+          <Runs runs={snapshot.dispatch?.recentRuns ?? []} byRun={activity.byRun} />
         {:else if view === 'schedules' && snapshot.schedules}
           <Schedules schedules={snapshot.schedules} agents={snapshot.agents} onChanged={() => void load()} />
         {:else if view === 'setup'}
-          <Setup platforms={snapshot.setup.platforms} project={snapshot.setup.project} notifications={snapshot.setup.notifications} update={snapshot.setup.update} version={snapshot.version} playbooks={snapshot.playbooks} recipes={snapshot.setup.recipes} sandbox={snapshot.sandbox} onChanged={() => void load()} />
+          <Setup platforms={snapshot.setup.platforms} agentSettings={snapshot.setup.agentSettings ?? []} project={snapshot.setup.project} notifications={snapshot.setup.notifications} update={snapshot.setup.update} version={snapshot.version} playbooks={snapshot.playbooks} recipes={snapshot.setup.recipes} sandbox={snapshot.sandbox} onChanged={() => void load()} />
         {:else}
           <h1 class="mb-4 font-display text-2xl font-semibold">Board</h1>
-          <div class="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
-            <section aria-label="Tasks" class="grid grid-cols-1 content-start gap-3 sm:grid-cols-2 2xl:grid-cols-3">
-              {#each COLUMNS.filter((c) => byStatus[c]?.length) as column (column)}
-                <div class="rounded-lg border border-stone-200 bg-white p-3 dark:border-stone-800 dark:bg-stone-900">
-                  <h2 class="mb-2 text-sm font-semibold text-stone-600 dark:text-stone-300">{column.replaceAll('_', ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase())} <span class="font-normal text-stone-500">({byStatus[column]?.length})</span></h2>
-                  <ul class="grid grid-cols-1 gap-2">
-                    {#each byStatus[column] ?? [] as task (task.id)}
-                      <li class="rounded-md border border-stone-200 p-2 text-sm dark:border-stone-800">
-                        <span class="font-mono text-xs text-stone-500">{task.id}</span>
-                        <div>{task.title}</div>
-                        <div class="text-xs text-stone-500">{task.assigned_agent_id ?? `suggested: ${task.suggested_owner ?? 'anyone'}`}</div>
-                        {#if locksOf(task.id).length}
-                          <div class="mt-1 text-xs text-stone-500" title={locksOf(task.id).map((l) => `${l.path} (${l.agentId})`).join('\n')}>
-                            {locksOf(task.id).length} file lock{locksOf(task.id).length === 1 ? '' : 's'}
-                            <button class="ml-1 underline" onclick={() => releaseLocks(task.id)}>Release</button>
-                          </div>
-                        {/if}
-                      </li>
-                    {/each}
-                  </ul>
-                </div>
-              {:else}
-                <p class="text-sm text-stone-500">No tasks yet.</p>
-              {/each}
-            </section>
-
-            <aside class="grid grid-cols-1 content-start gap-6">
-              <Controls tasks={snapshot.tasks} questions={snapshot.openQuestions} agents={snapshot.agents} stuck={snapshot.dispatch?.stuck ?? []} onChanged={() => void load()} />
-              <Timeline events={snapshot.events} tasks={snapshot.tasks} agents={snapshot.agents} />
-            </aside>
+          <Board
+            tasks={snapshot.tasks}
+            agents={snapshot.agents}
+            leases={snapshot.leases}
+            live={activity.live}
+            byRun={activity.byRun}
+            runs={snapshot.dispatch?.recentRuns ?? []}
+            onReleaseLocks={releaseLocks}
+          />
+          <div class="mt-8 grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <Controls tasks={snapshot.tasks} questions={snapshot.openQuestions} agents={snapshot.agents} stuck={snapshot.dispatch?.stuck ?? []} onChanged={() => void load()} />
+            <Timeline events={snapshot.events} tasks={snapshot.tasks} agents={snapshot.agents} />
           </div>
         {/if}
 

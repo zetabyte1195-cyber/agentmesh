@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync } from
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { agyCommand, claudeCommand, defaultAgyExecutable } from '../runner/commands.js';
+import { SUBAGENT_TOOLS } from './models.js';
 import { probeVersion } from './resolve.js';
 import type { Diagnosis, PlatformAdapter } from './types.js';
 
@@ -85,7 +86,14 @@ export const claudeAdapter: PlatformAdapter = {
   loopProtection: true,
   detect: () => probeVersion('claude', ['--version']),
   command: (spec) =>
-    claudeCommand({ prompt: spec.prompt, worktree: spec.cwd, mcpConfigFile: spec.run.claudeMcpConfig, allowedTools: spec.allowedTools ?? DEFAULT_CLAUDE_ALLOWED_TOOLS }),
+    claudeCommand({
+      prompt: spec.prompt,
+      worktree: spec.cwd,
+      mcpConfigFile: spec.run.claudeMcpConfig,
+      // Sub-agents are only allowed for an agent whose sub-agents the person switched on.
+      allowedTools: [...(spec.allowedTools ?? DEFAULT_CLAUDE_ALLOWED_TOOLS), ...(spec.subAgents ? SUBAGENT_TOOLS.filter((t) => !(spec.allowedTools ?? DEFAULT_CLAUDE_ALLOWED_TOOLS).includes(t)) : [])],
+      ...(spec.model ? { model: spec.model } : {}),
+    }),
 };
 
 export const antigravityAdapter: PlatformAdapter = {
@@ -113,5 +121,5 @@ export const antigravityAdapter: PlatformAdapter = {
       },
     ];
   },
-  command: (spec) => agyCommand({ prompt: spec.prompt, worktree: spec.cwd, extraDirs: [spec.run.dir], ...(spec.run.inContainer ? { executable: 'agy' } : {}) }),
+  command: (spec) => agyCommand({ prompt: spec.prompt, worktree: spec.cwd, extraDirs: [spec.run.dir], ...(spec.model ? { model: spec.model } : {}), ...(spec.run.inContainer ? { executable: 'agy' } : {}) }),
 };

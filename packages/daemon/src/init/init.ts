@@ -23,6 +23,10 @@ export interface InitAgent {
   platform: string;
   /** The instruction file that agent's tool reads (CLAUDE.md, GEMINI.md, AGENTS.md...). */
   rulebook: string;
+  /** The model this agent runs on (Claude Code and Antigravity); the tool's own default when not set. Chosen in the cockpit. */
+  model?: string;
+  /** Claude Code may start sub-agents. Off unless switched on in the cockpit. */
+  subAgents?: boolean;
 }
 
 export interface InitOptions {

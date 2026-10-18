@@ -2,12 +2,14 @@
   // Runs: every agent run, newest first. "Success" from an agent tool only means it finished without an
   // error, so the newest run on each task also says whether the task actually moved.
   import { formatUsage } from './api';
-  import type { Run } from './types';
+  import RunFeed from './RunFeed.svelte';
+  import type { ActivityEntry, Run } from './types';
 
-  let { runs }: { runs: Run[] } = $props();
+  let { runs, byRun = {} }: { runs: Run[]; /** What the page saw of each run, by run id. */ byRun?: Record<string, ActivityEntry[]> } = $props();
 
   let filter = $state<'all' | 'problems'>('all');
   let open = $state<Record<string, boolean>>({});
+  let feed = $state<Record<string, boolean>>({});
 
   const KIND: Record<string, string> = { TASK: 'Build', AUDIT: 'Review', HANDOFF: 'Message', PLAN: 'Plan', PLAN_REVIEW: 'Plan review', PLAN_REVISE: 'Plan revision', SPLIT: 'Split into tasks' };
   const STATUS: Record<string, { label: string; tone: string }> = {
@@ -55,6 +57,8 @@
             <span>{KIND[r.kind] ?? r.kind}{r.subject ? ': ' : ''}{#if r.subject}<span class="font-mono text-xs text-stone-500">{subject(r)}</span> {r.subjectTitle ?? ''}{/if}</span>
             <span class="ml-auto text-xs text-stone-500">{when(r.startedAt)}{r.seconds !== null ? ` · ${length(r.seconds)}` : ''}{usage(r) ? ` · ${usage(r)}` : ''}</span>
           </div>
+          <button class="mr-3 mt-1 text-xs underline" aria-expanded={Boolean(feed[r.id])} onclick={() => (feed[r.id] = !feed[r.id])}>{feed[r.id] ? 'Hide' : 'What it did'}</button>
+          {#if feed[r.id]}<div class="mt-1"><RunFeed runId={r.id} entries={byRun[r.id]} running={r.status === 'RUNNING'} /></div>{/if}
           {#if r.detail}
             <button class="mt-1 text-xs underline" aria-expanded={Boolean(open[r.id])} onclick={() => (open[r.id] = !open[r.id])}>{open[r.id] ? 'Hide' : r.status === 'SUCCEEDED' ? 'What it said' : 'Why'}</button>
             {#if open[r.id]}<pre class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-stone-100 p-2 font-mono text-xs dark:bg-stone-950">{r.detail}</pre>{/if}

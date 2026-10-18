@@ -17,6 +17,7 @@ export function snapshot(o: Record<string, unknown> = {}) {
     openQuestions: [],
     events: [],
     leases: [],
+    live: {},
     usage: { byAgent: [], byMission: [] },
     dispatch: { paused: false, backoffs: [], stuck: [], recentRuns: [] },
     setup: {

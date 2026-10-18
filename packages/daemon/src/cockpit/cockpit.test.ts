@@ -89,7 +89,7 @@ describe('cockpit data', () => {
     expect((await get('/api/state', { Authorization: `Bearer ${agentToken}` })).status).toBe(403);
     const r = await get('/api/state', { Cookie: await cookie() });
     expect(r.status).toBe(200);
-    expect(Object.keys(JSON.parse(r.body)).sort()).toEqual(['agents', 'dispatch', 'events', 'leases', 'missions', 'notices', 'openQuestions', 'playbooks', 'sandbox', 'schedules', 'tasks', 'usage']);
+    expect(Object.keys(JSON.parse(r.body)).sort()).toEqual(['agents', 'dispatch', 'events', 'leases', 'live', 'missions', 'notices', 'openQuestions', 'playbooks', 'sandbox', 'schedules', 'tasks', 'usage']);
   });
 
   it('pushes board events to the cockpit live, p95 under 100 ms (AC-3)', async () => {

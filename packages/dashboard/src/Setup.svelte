@@ -6,8 +6,9 @@
   import Notifications from './Notifications.svelte';
   import Playbooks from './Playbooks.svelte';
   import ProjectContext from './ProjectContext.svelte';
+  import AgentSettings from './AgentSettings.svelte';
   import RecipeCard from './RecipeCard.svelte';
-  import type { NotificationsState, PlaybooksState, RecipeInfo, SandboxState, UpdateState } from './types';
+  import type { AgentSetting, NotificationsState, PlaybooksState, RecipeInfo, SandboxState, UpdateState } from './types';
   import Updates from './Updates.svelte';
 
   type Diagnosis = { level: string; title: string; detail: string; fix?: string };
@@ -16,7 +17,7 @@
   type Project = { name: string; verifyCommand: string | null; landWithoutVerify: boolean; suggestedVerifyCommand: string | null; landing: boolean; context: string; maxContext: number };
   type TestResult = { ok: boolean; seconds: number; detail: string; said?: string };
 
-  let { platforms, project, notifications, update, version, playbooks, recipes, sandbox, onChanged }: { platforms: PlatformInfo[]; project: Project; playbooks: PlaybooksState | null; recipes: RecipeInfo[]; sandbox: SandboxState | null; notifications: NotificationsState; update: UpdateState; version: string | null; onChanged: () => void } = $props();
+  let { platforms, agentSettings = [], project, notifications, update, version, playbooks, recipes, sandbox, onChanged }: { platforms: PlatformInfo[]; agentSettings?: AgentSetting[]; project: Project; playbooks: PlaybooksState | null; recipes: RecipeInfo[]; sandbox: SandboxState | null; notifications: NotificationsState; update: UpdateState; version: string | null; onChanged: () => void } = $props();
 
   let detected = $state<Record<string, Detected>>({});
   let scanning = $state(false);
@@ -165,6 +166,10 @@
   {/if}
   <p class="mt-3 text-xs text-stone-500">A tool that is not listed? Describe it under "customPlatforms" in .agentmesh/config.json (see the README); it appears above as unverified until you test it.</p>
 </section>
+
+{#if agentSettings.length}
+  <AgentSettings agents={agentSettings} {onChanged} />
+{/if}
 
 <section aria-label="Project check" class="rounded-xl border border-stone-200 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
   <h2 class="text-base font-semibold">How should we check your project works?</h2>

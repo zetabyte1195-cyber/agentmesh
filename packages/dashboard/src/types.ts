@@ -63,3 +63,26 @@ export type RecipeField = { id: string; label: string; hint: string; default: st
 export type RecipeInfo = { id: string; title: string; summary: string; caveats: string[]; install: string; signIn: string; docs: string[]; fields: RecipeField[]; added: boolean; /** The choices as they are set, for a recipe that was added (null otherwise). */ current: Record<string, string> | null };
 
 export type SandboxState = { enabled: boolean; experimental: boolean; image: string; checks: 'host' | 'container'; agents: string[] | null; listener: { host: string; port: number } | null; blockedReason: string | null; warnings: string[] };
+
+// The live view: what an agent is doing as it works (pushed over the live connection), and what a task's workspace changed.
+export type ActivityEntry = { seq: number; at: string; kind: 'start' | 'text' | 'tool' | 'end'; text: string; path?: string; failed?: boolean; /** Done by a sub-agent the agent started. */ sub?: boolean; /** The same step this many times in a row. */ repeat?: number };
+export type ActivityChange = { runId: string; agentId: string; taskId: string | null; running: boolean; entries: ActivityEntry[] };
+export type LiveRun = { runId: string; taskId: string | null; entries: ActivityEntry[] };
+export type ChangedFile = { path: string; status: 'added' | 'modified' | 'deleted' | 'renamed'; added: number | null; removed: number | null; from?: string };
+/** A task as the daemon sends it (the columns of its row). */
+export type BoardTask = {
+  id: string;
+  title: string;
+  status: string;
+  assigned_agent_id: string | null;
+  suggested_owner: string | null;
+  phase_id: string | null;
+  /** A JSON list of task ids, as text. */
+  prerequisites: string;
+  worktree_path: string | null;
+  acceptance_criteria?: string;
+  updated_at?: string;
+};
+
+/** What can be chosen for one agent, and what is chosen. */
+export type AgentSetting = { id: string; platform: string; model: string | null; subAgents: boolean; canChooseModel: boolean; canUseSubAgents: boolean };

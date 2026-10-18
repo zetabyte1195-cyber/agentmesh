@@ -19,6 +19,8 @@ import type { LeaseArbiter } from '../leases/index.js';
 import { type MissionService, planJob, reviewJob, reviseJob, splitJob } from '../missions/index.js';
 import { MISSION_PHASE_PREFIX } from '../missions/service.js';
 import type { AgentCommand } from '../runner/commands.js';
+import type { ActivityLog } from '../activity/index.js';
+import type { RunnerEvent } from '../runner/events.js';
 import { type RunResult, type RunningAgent, startAgent } from '../runner/run.js';
 import { type SandboxRuntime, explainSandboxFailure } from '../sandbox/index.js';
 import { composePrompt } from './prompt.js';
@@ -139,6 +141,8 @@ export interface DispatcherOptions {
   scratch?: { create(name: string): Promise<string>; remove(path: string): Promise<void> };
   /** Test seam; defaults to the P2.2 runner. */
   start?: typeof startAgent;
+  /** What each run does, for the live feed in the cockpit (the events of its stream, never a tool's output). */
+  activity?: ActivityLog;
   onRunFinished?: (run: { runId: string; agentId: string; work: Work; result: RunResult }) => void;
 }
 
@@ -611,10 +615,13 @@ export class Dispatcher {
         command = agent.command(prompt, cwd, run);
       }
       this.containers.set(runId, containerName);
+      const activity = this.options.activity;
+      activity?.begin(runId, { agentId: agent.agentId, taskId: work.taskId ?? null, cwd });
       running = (this.options.start ?? startAgent)({
         command,
         cwd,
         env: { AGENTMESH_TOKEN: token },
+        ...(activity ? { onEvent: (event: RunnerEvent) => activity.record(runId, event) } : {}),
         ...(hooks ? { terminate: hooks.terminate, cleanup: hooks.cleanup } : {}),
         ...(this.options.runTimeoutMs ? { timeoutMs: this.options.runTimeoutMs } : {}),
         heartbeat: {
@@ -632,6 +639,7 @@ export class Dispatcher {
       removeRunDir(run.dir);
       this.running.delete(agent.agentId);
       db.prepare("UPDATE dispatch_runs SET status = 'FAILED', detail = ?, ended_at = ? WHERE id = ?").run(`launch failed: ${(err as Error).message}`, sqlTime(this.now()), runId);
+      this.options.activity?.end(runId, 'FAILED');
       return false;
     }
     this.running.set(agent.agentId, { runId, taskId: work.taskId ?? null, agent: running });
@@ -684,6 +692,7 @@ export class Dispatcher {
     const rawDetail = (result.ok ? (result.result?.text ?? '') : text).trim().replace(/\n{2,}/g, '\n');
     const detail = (infra ? `[container] ${infra.text}\n${rawDetail}` : rawDetail).slice(-4000) || null;
     db.prepare('UPDATE dispatch_runs SET status = ?, detail = ?, ended_at = ? WHERE id = ?').run(status, detail, sqlTime(this.now()), runId);
+    this.options.activity?.end(runId, status);
     if (result.result && (this.usageTable ??= hasUsageTable(db))) recordUsage(db, runId, result.result.usage, result.result.costUsd);
     this.options.onRunFinished?.({ runId, agentId: agent.agentId, work, result });
   }

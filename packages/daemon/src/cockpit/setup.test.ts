@@ -264,6 +264,90 @@ describe('adding Claude Code on a local model (Ollama) from its recipe', () => {
   });
 });
 
+describe('choosing the model and sub-agents of an agent', () => {
+  type S = { id: string; platform: string; model: string | null; subAgents: boolean; canChooseModel: boolean; canUseSubAgents: boolean };
+  const settings = async () => ((await get('/api/state')).json as { setup: { agentSettings: S[] } }).setup.agentSettings;
+  const saved = () => (config().agents as { id: string; model?: string; subAgents?: boolean }[]).find((a) => a.id === 'claude-1')!;
+  const timeline = async () => ((await get('/api/state')).json as { events: { text: string }[] }).events.map((e) => e.text);
+
+  it('offers what can be chosen for each agent, and nothing is chosen at first', async () => {
+    expect((await settings()).find((s) => s.id === 'claude-1')).toEqual({ id: 'claude-1', platform: 'CLAUDE_CODE', model: null, subAgents: false, canChooseModel: true, canUseSubAgents: true });
+  });
+
+  it('sets the model and sub-agents, saves them in the settings file, shows them, and records it in the timeline', async () => {
+    const r = await post('/api/agents/settings', { agentId: 'claude-1', model: 'opus', subAgents: true });
+    expect(r).toMatchObject({ status: 200, json: { id: 'claude-1', model: 'opus', subAgents: true } });
+    expect(saved()).toMatchObject({ model: 'opus', subAgents: true });
+    expect((await settings()).find((s) => s.id === 'claude-1')).toMatchObject({ model: 'opus', subAgents: true });
+    const t = await timeline();
+    expect(t.some((x) => x.includes('set the model of claude-1 to opus') && x.includes('from its next run'))).toBe(true);
+    expect(t.some((x) => x.includes('allowed sub-agents for claude-1'))).toBe(true);
+  });
+
+  it('puts it back on the default: nothing is left in the settings file', async () => {
+    await post('/api/agents/settings', { agentId: 'claude-1', model: 'opus', subAgents: true });
+    expect((await post('/api/agents/settings', { agentId: 'claude-1', model: null, subAgents: false })).status).toBe(200);
+    expect(saved()).not.toHaveProperty('model');
+    expect(saved()).not.toHaveProperty('subAgents');
+    expect((await timeline()).some((x) => x.includes('back on its tool\'s default model'))).toBe(true);
+    // a blank box means the same, and one thing can be changed without the other
+    await post('/api/agents/settings', { agentId: 'claude-1', model: 'haiku' });
+    await post('/api/agents/settings', { agentId: 'claude-1', subAgents: true });
+    expect(saved()).toMatchObject({ model: 'haiku', subAgents: true });
+    await post('/api/agents/settings', { agentId: 'claude-1', model: '   ' });
+    expect(saved()).not.toHaveProperty('model');
+    expect(saved()).toMatchObject({ subAgents: true });
+  });
+
+  it('refuses a model that is not a name, an agent that is not there, and an agent whose tool is defined by hand, saving nothing', async () => {
+    for (const model of ['--help', 'a b', 'x;rm -rf', '$(x)']) {
+      const r = await post('/api/agents/settings', { agentId: 'claude-1', model });
+      expect(r.status, model).toBe(409);
+      expect((r.json as { error: string }).error).toMatch(/not a model name/);
+    }
+    expect((await post('/api/agents/settings', { agentId: 'nobody-1', model: 'opus' })).status).toBe(404);
+    expect((await post('/api/agents/settings', { agentId: 'claude-1', extra: 1 })).status).toBe(400);
+    expect((await post('/api/agents/settings', { agentId: 'Bad Id', model: 'opus' })).status).toBe(400);
+    await post('/api/agents', { platform: 'FAKE' }); // a tool defined in the configuration
+    const custom = await post('/api/agents/settings', { agentId: 'fake-1', model: 'opus' });
+    expect(custom.status).toBe(409);
+    expect((custom.json as { error: string }).error).toMatch(/own definition/);
+    expect(saved()).not.toHaveProperty('model');
+  });
+
+  it('is kept when AgentMesh is started again', async () => {
+    await post('/api/agents/settings', { agentId: 'claude-1', model: 'sonnet', subAgents: true });
+    await d.stop();
+    d = await startDaemon({ repoRoot: repo, port: 0, autoDispatch: false, log: () => {} });
+    const login = new URL(d.loginUrl);
+    cookie = await new Promise<string>((resolve) => {
+      request({ host: '127.0.0.1', port: d.port, path: login.pathname + login.search, headers: { Host: `127.0.0.1:${d.port}` } }, (r) => {
+        r.resume();
+        resolve(String(r.headers['set-cookie']).split(';')[0]!);
+      }).end();
+    });
+    origin = `http://127.0.0.1:${d.port}`;
+    expect((await settings()).find((s) => s.id === 'claude-1')).toMatchObject({ model: 'sonnet', subAgents: true });
+  });
+
+  it('is the Human\'s: an agent, no session, or a request from another page is refused', async () => {
+    const token = d.identity.issueToken('claude-1', 'test');
+    const body = { agentId: 'claude-1', model: 'opus' };
+    expect((await send('POST', '/api/agents/settings', { Authorization: `Bearer ${token}` }, body)).status).toBe(403);
+    expect((await send('POST', '/api/agents/settings', { Origin: origin }, body)).status).toBe(401);
+    expect((await send('POST', '/api/agents/settings', { Cookie: cookie }, body)).status).toBe(403);
+    expect(saved()).not.toHaveProperty('model');
+  });
+
+  it('lists the models to offer for a platform (Claude\'s are the aliases; a tool defined by hand has none), for the Human only', async () => {
+    const claude = (await post('/api/models', { platform: 'CLAUDE_CODE' })).json as { models: { id: string }[]; note: string };
+    expect(claude.models.map((m) => m.id)).toEqual(['sonnet', 'opus', 'haiku']);
+    expect(((await post('/api/models', { platform: 'FAKE' })).json as { models: unknown[] }).models).toEqual([]);
+    expect((await post('/api/models', {})).status).toBe(400);
+    expect((await send('POST', '/api/models', { Origin: origin }, { platform: 'CLAUDE_CODE' })).status).toBe(401);
+  });
+});
+
 describe('the cockpit session', () => {
   const loginAgain = async () => {
     origin = `http://127.0.0.1:${d.port}`;
