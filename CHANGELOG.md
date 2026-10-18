@@ -2,7 +2,7 @@
 
 What changed in each release, newest first. AgentMesh is young: until 1.0, any release may change how things look or are named, and the notes below say when something you rely on moved.
 
-## Unreleased
+## 0.2.0 (2026-10-18)
 
 ### Added
 
